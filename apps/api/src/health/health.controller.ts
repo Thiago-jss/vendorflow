@@ -1,9 +1,9 @@
 import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
-import { PrismaService } from "../platform/prisma/prisma.service";
+import { DatabaseService } from "@vendorflow/database";
 
 @Controller("health")
 export class HealthController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly database: DatabaseService) {}
 
   @Get()
   liveness(): { status: "ok" } {
@@ -12,7 +12,7 @@ export class HealthController {
 
   @Get("ready")
   async readiness(): Promise<{ status: "ok" }> {
-    if (!(await this.prisma.isHealthy())) {
+    if (!(await this.database.isHealthy())) {
       throw new ServiceUnavailableException("Database is unavailable");
     }
 

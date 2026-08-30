@@ -12,8 +12,7 @@ export const environmentSchema = z.object({
     .refine((origins) => origins.length > 0 && origins.every((origin) => url.safeParse(origin).success), {
       message: "CORS_ORIGINS must be a comma-separated list of valid URLs"
     }),
-  DATABASE_URL: url,
-  REDIS_URL: url
+  DATABASE_URL: url
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

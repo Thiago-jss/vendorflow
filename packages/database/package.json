@@ -1,0 +1,36 @@
+{
+  "name": "@vendorflow/database",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "prisma:migrate": "prisma migrate dev --schema prisma/schema.prisma",
+    "prisma:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
+    "prisma:validate": "prisma validate --schema prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@nestjs/common": "11.1.6",
+    "@prisma/client": "6.16.1"
+  },
+  "devDependencies": {
+    "@vendorflow/config": "workspace:*",
+    "@vendorflow/eslint-config": "workspace:*",
+    "eslint": "9.35.0",
+    "prisma": "6.16.1",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}
