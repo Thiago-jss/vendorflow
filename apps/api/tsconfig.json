@@ -1,0 +1,8 @@
+{
+  "extends": "../../packages/config/nest.json",
+  "compilerOptions": {
+    "baseUrl": "./",
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@vendorflow/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@vendorflow/config": "workspace:*",
+    "@vendorflow/eslint-config": "workspace:*",
+    "eslint": "9.35.0",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

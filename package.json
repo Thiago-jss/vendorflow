@@ -1,0 +1,26 @@
+{
+  "name": "vendorflow",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "format:check": "prettier --check .",
+    "db:generate": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:generate",
+    "db:migrate": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:migrate",
+    "db:deploy": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:deploy"
+  },
+  "devDependencies": {
+    "dotenv-cli": "8.0.0",
+    "prettier": "3.6.2",
+    "turbo": "2.5.6"
+  }
+}

@@ -1,0 +1,18 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A neutral platform table makes the Prisma client and migration workflow real
+// without prematurely modelling VendorFlow business entities.
+model PlatformMetadata {
+  key       String   @id @db.VarChar(100)
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_metadata")
+}
