@@ -2,7 +2,7 @@ import { Module } from "@nestjs/common";
 import { LoggerModule } from "nestjs-pino";
 import { ApplicationConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
-import { PrismaModule } from "./platform/prisma/prisma.module";
+import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
 
 @Module({
   imports: [
@@ -25,7 +25,7 @@ import { PrismaModule } from "./platform/prisma/prisma.module";
         customProps: (request) => ({ correlationId: request.id })
       }
     }),
-    PrismaModule,
+    TenantContextModule,
     HealthModule
   ]
 })

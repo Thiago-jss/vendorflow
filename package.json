@@ -14,9 +14,10 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "format:check": "prettier --check .",
-    "db:generate": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:generate",
-    "db:migrate": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:migrate",
-    "db:deploy": "dotenv -e .env -- pnpm --filter @vendorflow/api prisma:deploy"
+    "db:generate": "dotenv -e .env -- pnpm --filter @vendorflow/database prisma:generate",
+    "db:migrate": "dotenv -e .env -- pnpm --filter @vendorflow/database prisma:migrate",
+    "db:deploy": "dotenv -e .env -- pnpm --filter @vendorflow/database prisma:deploy",
+    "db:validate": "dotenv -e .env -- pnpm --filter @vendorflow/database prisma:validate"
   },
   "devDependencies": {
     "dotenv-cli": "8.0.0",

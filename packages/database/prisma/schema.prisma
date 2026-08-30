@@ -7,8 +7,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// A neutral platform table makes the Prisma client and migration workflow real
-// without prematurely modelling VendorFlow business entities.
+// Temporary bootstrap-only table. It has no business/runtime responsibility.
+// Remove it with a new migration when the first real domain migration makes it unnecessary;
+// do not rewrite the committed bootstrap migration.
 model PlatformMetadata {
   key       String   @id @db.VarChar(100)
   value     String

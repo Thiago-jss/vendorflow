@@ -4,8 +4,6 @@ const url = z.string().url();
 
 export const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  DATABASE_URL: url,
-  REDIS_URL: url,
   RABBITMQ_URL: url
 });
 

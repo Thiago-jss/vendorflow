@@ -47,9 +47,15 @@ The web app is available at `http://localhost:3000`; the API liveness endpoint i
 `http://localhost:3001/health`; RabbitMQ management is `http://localhost:15672`
 (`vendorflow` / `vendorflow`). API readiness at `/health/ready` verifies PostgreSQL.
 
-The API and worker validate their mandatory environment configuration at startup. Required
-values are `DATABASE_URL`, `REDIS_URL`, and (for the worker) `RABBITMQ_URL`; the API also
-requires `CORS_ORIGINS`. Do not put secrets in `NEXT_PUBLIC_*` values.
+The API requires `DATABASE_URL` and `CORS_ORIGINS`. The worker currently requires only
+`RABBITMQ_URL`; it will require `DATABASE_URL` when its first database-backed responsibility
+is introduced. Redis remains available in Docker Compose for future ephemeral concerns, but
+neither application requires `REDIS_URL` to boot. Do not put secrets in `NEXT_PUBLIC_*`
+values.
+
+Prisma infrastructure, the authoritative schema, and the single migration history live in
+`packages/database`. API and worker code must use that package rather than importing one
+another's infrastructure.
 
 ## Commands
 
@@ -62,8 +68,9 @@ pnpm build        # build all workspaces
 pnpm db:generate  # generate Prisma Client
 pnpm db:migrate   # create a local development migration
 pnpm db:deploy    # apply committed migrations
+pnpm db:validate  # validate the authoritative Prisma schema
 ```
 
 Docker Compose runs infrastructure only. Application processes run locally to keep the
-development feedback loop fast. Redis and RabbitMQ are configured foundations only: no cache
-behavior, consumers, outbox, retries, or dead-letter queues exist yet.
+development feedback loop fast. Redis has no runtime responsibility. RabbitMQ is connected
+by the worker, but no consumers, outbox, retries, or dead-letter queues exist yet.

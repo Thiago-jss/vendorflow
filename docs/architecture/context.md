@@ -260,4 +260,6 @@ That ranking is the main justification for ADR-001.
 
 The container view — how the system is split into deployable units, and how those units talk
 to the database and to each other — is decided in
-[`docs/adr/ADR-001-modular-monolith.md`](../adr/ADR-001-modular-monolith.md).
+[`docs/adr/ADR-001-modular-monolith.md`](../adr/ADR-001-modular-monolith.md). The concrete
+tenant-scoping, persistence, database-constraint and verification rules are decided in
+[`docs/adr/ADR-002-multi-tenant-data-isolation.md`](../adr/ADR-002-multi-tenant-data-isolation.md).
