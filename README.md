@@ -1,8 +1,9 @@
 # VendorFlow
 
 VendorFlow is an open-source B2B procurement platform. This repository currently provides
-the production-oriented technical bootstrap; procurement workflows are intentionally not
-implemented yet. Product and architecture decisions live in [`docs/`](docs/).
+the production-oriented technical bootstrap and the identity/organization persistence
+foundation; procurement workflows are intentionally not implemented yet. Product and
+architecture decisions live in [`docs/`](docs/).
 
 ## Prerequisites
 
@@ -63,7 +64,8 @@ another's infrastructure.
 pnpm dev          # run web, API, and worker
 pnpm lint         # lint all workspaces
 pnpm typecheck    # strict TypeScript checks
-pnpm test         # API/worker Jest and web Vitest tests
+pnpm test         # all tests, including PostgreSQL/Testcontainers integration tests
+pnpm test:integration # PostgreSQL/Testcontainers integration tests only
 pnpm build        # build all workspaces
 pnpm db:generate  # generate Prisma Client
 pnpm db:migrate   # create a local development migration
@@ -74,3 +76,9 @@ pnpm db:validate  # validate the authoritative Prisma schema
 Docker Compose runs infrastructure only. Application processes run locally to keep the
 development feedback loop fast. Redis has no runtime responsibility. RabbitMQ is connected
 by the worker, but no consumers, outbox, retries, or dead-letter queues exist yet.
+
+Docker must be available when running the API integration tests. The tests start their own
+isolated PostgreSQL container and apply the committed Prisma migration history; they do not
+reuse or clean the development database. The implemented identity model and tenant-key
+design are described in
+[`docs/architecture/identity-persistence.md`](docs/architecture/identity-persistence.md).

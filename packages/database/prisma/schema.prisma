@@ -7,13 +7,93 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Temporary bootstrap-only table. It has no business/runtime responsibility.
-// Remove it with a new migration when the first real domain migration makes it unnecessary;
-// do not rewrite the committed bootstrap migration.
-model PlatformMetadata {
-  key       String   @id @db.VarChar(100)
-  value     String
-  updatedAt DateTime @updatedAt
+enum Role {
+  EMPLOYEE
+  MANAGER
+  BUYER
+  FINANCE
+  ADMIN
 
-  @@map("platform_metadata")
+  @@map("role")
+}
+
+model Organization {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(200)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  branches    Branch[]
+  departments Department[]
+  users       User[]
+  userRoles   UserRole[]
+
+  @@map("organizations")
+}
+
+model Branch {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String   @db.VarChar(200)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  departments  Department[]
+  users        User[]
+
+  @@unique([organizationId, id], map: "branches_organization_id_id_key")
+  @@unique([organizationId, name], map: "branches_organization_id_name_key")
+  @@map("branches")
+}
+
+model Department {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  branchId       String   @map("branch_id") @db.Uuid
+  name           String   @db.VarChar(200)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  branch       Branch       @relation(fields: [organizationId, branchId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  users        User[]
+
+  @@unique([organizationId, id], map: "departments_organization_id_id_key")
+  @@unique([organizationId, branchId, id], map: "departments_organization_id_branch_id_id_key")
+  @@unique([organizationId, branchId, name], map: "departments_organization_id_branch_id_name_key")
+  @@map("departments")
+}
+
+model User {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  branchId       String   @map("branch_id") @db.Uuid
+  departmentId   String   @map("department_id") @db.Uuid
+  name           String   @db.VarChar(200)
+  email          String   @unique(map: "users_email_key") @db.VarChar(320)
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  branch       Branch       @relation(fields: [organizationId, branchId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  department   Department   @relation(fields: [organizationId, branchId, departmentId], references: [organizationId, branchId, id], onDelete: Restrict, onUpdate: Restrict)
+  roles        UserRole[]
+
+  @@unique([organizationId, id], map: "users_organization_id_id_key")
+  @@map("users")
+}
+
+model UserRole {
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  role           Role
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user         User         @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([organizationId, userId, role], map: "user_roles_pkey")
+  @@map("user_roles")
 }

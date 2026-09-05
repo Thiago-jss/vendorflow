@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { LoggerModule } from "nestjs-pino";
 import { ApplicationConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
+import { IdentityAccessModule } from "./identity-access/identity-access.module";
 import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
 
 @Module({
@@ -18,15 +19,16 @@ import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
             "req.body.token",
             "req.body.accessToken",
             "req.body.refreshToken",
-            "res.headers['set-cookie']"
+            "res.headers['set-cookie']",
           ],
-          censor: "[REDACTED]"
+          censor: "[REDACTED]",
         },
-        customProps: (request) => ({ correlationId: request.id })
-      }
+        customProps: (request) => ({ correlationId: request.id }),
+      },
     }),
     TenantContextModule,
-    HealthModule
-  ]
+    IdentityAccessModule,
+    HealthModule,
+  ],
 })
 export class AppModule {}
