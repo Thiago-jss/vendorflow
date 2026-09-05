@@ -205,9 +205,13 @@ Future migrations for tenant-owned tables must enforce these PostgreSQL patterns
    onto a child is intentional when it permits the database to enforce the boundary.
 
 4. **Tenant-aware uniqueness.** Business keys that are unique per customer use composite
-   constraints such as `(organization_id, tax_identifier)`, `(organization_id, email)`, or
-   `(organization_id, purchase_order_number)`. Global uniqueness is used only when it is a
-   stated product rule.
+   constraints such as `(organization_id, tax_identifier)` or
+   `(organization_id, purchase_order_number)`. Normalized User email is a deliberate global
+   uniqueness exception for the single-Organization User model: authentication resolves the
+   User by email and derives `organization_id` from that persisted identity instead of
+   accepting tenant authority from the client. If multi-Organization membership is later
+   required, evolve toward a global User plus Organization Membership rather than duplicate
+   User identities for one email.
 5. **Tenant-leading indexes.** Indexes serving product queries begin with
    `organization_id`, followed by filter/order columns. A typical stable keyset pagination
    index is `(organization_id, created_at DESC, id DESC)`. Constraint indexes and query
@@ -263,11 +267,10 @@ decision.
 - PostgreSQL-real integration tests are slower than unit tests and require lifecycle tooling
   that is not introduced until real tenant-owned tables exist.
 
-The `platform_metadata` table remains temporarily in the authoritative schema solely to
-preserve the concrete bootstrap migration. It has no runtime reader or business meaning. Do
-not add artificial records or tables around it. Remove it with a new migration when the
-first real domain migration makes it unnecessary; never rewrite an already-applied migration
-to erase it.
+The `platform_metadata` table was temporary and existed solely to make the bootstrap
+migration concrete. The first identity domain migration now removes it with a forward
+migration; the historical bootstrap migration remains unchanged so fresh and already-migrated
+databases converge through the same migration history.
 
 ## Trade-offs
 
@@ -310,11 +313,13 @@ additional detection, but no single layer is treated as sufficient.
 
 ## Evolution Path
 
-1. **First domain migration:** introduce Organization and its owned hierarchy only when the
-   identity-access feature needs them. Apply the constraints above and remove
-   `platform_metadata` in a new migration when safe.
-2. **First module repository:** expose only tenant-scoped operations, add module import
-   boundaries, and establish the reusable two-tenant PostgreSQL integration-test harness.
+1. **First domain migration — implemented:** Organization and its owned identity hierarchy
+   now use the constraints above. A forward migration removes `platform_metadata` without
+   rewriting the bootstrap migration.
+2. **First module repository — implemented:** `identity-access` exposes tenant-scoped
+   operations and a reusable two-tenant PostgreSQL/Testcontainers integration-test harness.
+   The concrete model and trade-offs are documented in
+   [`identity-persistence.md`](../architecture/identity-persistence.md).
 3. **Worker persistence:** when ADR-003 introduces a transactional outbox or a real
    database-backed job, let the worker depend on `@vendorflow/database`, require
    `DATABASE_URL`, and define a trusted system-operation context. Do not reuse HTTP parsing

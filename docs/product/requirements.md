@@ -319,9 +319,11 @@ Actors are **roles**, not accounts. One user may hold several roles (FR-006, AUT
 - **MT-005** Tenant scoping is applied at a single enforced choke point in data access, not
   re-implemented per query. A new query must be scoped by construction, and it must be
   possible to demonstrate that an unscoped query is a detectable defect.
-- **MT-006** Uniqueness constraints that are conceptually per-tenant (supplier tax
-  identifier, purchase order number, user email) are enforced as composite constraints
-  including the organization identifier.
+- **MT-006** Uniqueness constraints that are conceptually per-tenant (including supplier tax
+  identifier and purchase order number) are enforced as composite constraints including the
+  organization identifier. Normalized User email is globally unique in the MVP so
+  authentication can resolve the authoritative User and derive its Organization without
+  accepting a client-supplied tenant identifier.
 - **MT-007** Cross-tenant isolation is verified by automated tests that attempt direct
   identifier access across organizations for every tenant-owned resource type.
 - **MT-008** Caches, background jobs and asynchronous message payloads carry the tenant

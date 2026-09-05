@@ -3,7 +3,7 @@ export const principalRoles = [
   "MANAGER",
   "BUYER",
   "FINANCE",
-  "ADMINISTRATOR",
+  "ADMIN",
 ] as const;
 
 export type PrincipalRole = (typeof principalRoles)[number];
