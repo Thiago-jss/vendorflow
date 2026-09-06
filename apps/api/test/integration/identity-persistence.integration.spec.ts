@@ -3,9 +3,9 @@ import { DatabaseService } from "@vendorflow/database";
 import {
   CurrentOrganizationContextNotFoundError,
   GetCurrentOrganizationContext,
-} from "../../src/identity-access/application/get-current-organization-context";
+} from "../../src/identity-access/application/use-cases/get-current-organization-context";
 import type { TrustedPrincipal } from "../../src/platform/tenancy/trusted-principal";
-import { PrismaIdentityAccessRepository } from "../../src/identity-access/infrastructure/prisma-identity-access.repository";
+import { PrismaIdentityAccessRepository } from "../../src/identity-access/infrastructure/authentication/persistence/prisma-identity-access.repository";
 import { PostgreSqlIntegrationTestHarness } from "./postgresql-test-harness";
 
 interface TenantFixture {

@@ -1,15 +1,14 @@
 import { Injectable } from "@nestjs/common";
 import { DatabaseService } from "@vendorflow/database";
 import type {
+  AuthenticatedPrincipalRecord,
   CurrentOrganizationContextRecord,
   FindTenantBranchCriteria,
   IdentityAccessRepository,
   TenantBranch,
-} from "../application/identity-access.repository";
-import {
-  principalRoles,
-  type PrincipalRole,
-} from "../../platform/tenancy/trusted-principal";
+  UserCredentialRecord,
+} from "../../../application/contracts/identity-access.repository";
+import { toPrincipalRole } from "./principal-role";
 
 @Injectable()
 export class PrismaIdentityAccessRepository
@@ -102,20 +101,79 @@ export class PrismaIdentityAccessRepository
         userId: membership.id,
         branch: membership.branch,
         department: membership.department,
-        roles: membership.roles.map(({ role }) => this.toPrincipalRole(role)),
+        roles: membership.roles.map(({ role }) => toPrincipalRole(role)),
       },
     };
   }
 
-  private toPrincipalRole(role: string): PrincipalRole {
-    const principalRole = principalRoles.find(
-      (candidate) => candidate === role,
-    );
+  /**
+   * Authentication-only. Selected by primary key alone so the caller can compare persisted
+   * `organizationId` against the signed claim; scoping by the claimed organization would
+   * hide a mismatch as a miss. `isActive` is part of the predicate so a deactivated user is
+   * simply absent, which is what makes deactivation take effect on the next request.
+   */
+  async findAuthenticatedPrincipal(criteria: {
+    readonly userId: string;
+  }): Promise<AuthenticatedPrincipalRecord | null> {
+    const user = await this.database.user.findUnique({
+      where: {
+        id: criteria.userId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        roles: {
+          orderBy: {
+            role: "asc",
+          },
+          select: {
+            role: true,
+          },
+        },
+      },
+    });
 
-    if (principalRole === undefined) {
-      throw new Error("Persistence returned an unsupported role");
+    if (user === null) {
+      return null;
     }
 
-    return principalRole;
+    return {
+      userId: user.id,
+      organizationId: user.organizationId,
+      roles: user.roles.map(({ role }) => toPrincipalRole(role)),
+    };
+  }
+
+  /**
+   * Authentication-only. Normalized email is globally unique so login resolves the User
+   * first and derives its Organization (MT-006). `isActive` and `passwordHash` are returned
+   * rather than filtered, so every rejection reason takes one identical application path.
+   */
+  async findCredentialByEmail(criteria: {
+    readonly email: string;
+  }): Promise<UserCredentialRecord | null> {
+    const user = await this.database.user.findUnique({
+      where: {
+        email: criteria.email,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        isActive: true,
+        passwordHash: true,
+      },
+    });
+
+    if (user === null) {
+      return null;
+    }
+
+    return {
+      userId: user.id,
+      organizationId: user.organizationId,
+      isActive: user.isActive,
+      passwordHash: user.passwordHash,
+    };
   }
 }

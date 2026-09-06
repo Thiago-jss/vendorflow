@@ -1,10 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
-import type { TrustedPrincipal } from "../../platform/tenancy/trusted-principal";
+import type { TrustedPrincipal } from "../../../platform/tenancy/trusted-principal";
 import {
   IDENTITY_ACCESS_REPOSITORY,
   type CurrentOrganizationContextRecord,
   type IdentityAccessRepository,
-} from "./identity-access.repository";
+} from "../contracts/identity-access.repository";
 
 export class CurrentOrganizationContextNotFoundError extends Error {
   constructor() {

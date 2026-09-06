@@ -17,6 +17,18 @@ enum Role {
   @@map("role")
 }
 
+/// Why an AuthSession stopped being usable. ROTATED marks the predecessor of a
+/// successful refresh rotation; REUSE_DETECTED marks every still-active session of a
+/// family whose already-rotated token was presented again.
+enum AuthSessionRevocationReason {
+  ROTATED
+  LOGOUT
+  REUSE_DETECTED
+  PRINCIPAL_INACTIVE
+
+  @@map("auth_session_revocation_reason")
+}
+
 model Organization {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name      String   @db.VarChar(200)
@@ -27,6 +39,7 @@ model Organization {
   departments Department[]
   users       User[]
   userRoles   UserRole[]
+  authSessions AuthSession[]
 
   @@map("organizations")
 }
@@ -72,6 +85,11 @@ model User {
   departmentId   String   @map("department_id") @db.Uuid
   name           String   @db.VarChar(200)
   email          String   @unique(map: "users_email_key") @db.VarChar(320)
+  /// Argon2id PHC string. Nullable because a User may exist before any credential-
+  /// management flow gives it one; such a User can never authenticate. There is no
+  /// default, no backfill and no seed credential. A database CHECK constraint (SQL only)
+  /// additionally requires NULL or an Argon2id PHC value.
+  passwordHash   String?  @map("password_hash") @db.VarChar(255)
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -80,6 +98,7 @@ model User {
   branch       Branch       @relation(fields: [organizationId, branchId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   department   Department   @relation(fields: [organizationId, branchId, departmentId], references: [organizationId, branchId, id], onDelete: Restrict, onUpdate: Restrict)
   roles        UserRole[]
+  authSessions AuthSession[]
 
   @@unique([organizationId, id], map: "users_organization_id_id_key")
   @@map("users")
@@ -96,4 +115,32 @@ model UserRole {
 
   @@id([organizationId, userId, role], map: "user_roles_pkey")
   @@map("user_roles")
+}
+
+/// Server-side refresh session. The refresh token itself is opaque and never persisted;
+/// only its SHA-256 digest is stored, so a database read cannot reconstruct a usable
+/// credential. Rotation is an atomic conditional UPDATE on token_hash (see
+/// docs/architecture/authentication-session-security.md).
+model AuthSession {
+  id               String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId   String                       @map("organization_id") @db.Uuid
+  userId           String                       @map("user_id") @db.Uuid
+  /// Every session descending from one login shares a family. Detected reuse revokes the
+  /// whole family, not just the replayed session.
+  familyId         String                       @map("family_id") @db.Uuid
+  tokenHash        Bytes                        @unique(map: "auth_sessions_token_hash_key") @map("token_hash")
+  issuedAt         DateTime                     @default(now()) @map("issued_at") @db.Timestamptz(3)
+  /// Absolute lifetime. A successor inherits its predecessor's value; rotation never
+  /// extends a session.
+  expiresAt        DateTime                     @map("expires_at") @db.Timestamptz(3)
+  revokedAt        DateTime?                    @map("revoked_at") @db.Timestamptz(3)
+  revocationReason AuthSessionRevocationReason? @map("revocation_reason")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user         User         @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "auth_sessions_organization_id_id_key")
+  @@index([organizationId, userId, issuedAt(sort: Desc)], map: "auth_sessions_organization_id_user_id_issued_at_idx")
+  @@index([familyId], map: "auth_sessions_family_id_idx")
+  @@map("auth_sessions")
 }
