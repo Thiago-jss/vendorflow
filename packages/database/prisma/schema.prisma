@@ -29,6 +29,23 @@ enum AuthSessionRevocationReason {
   @@map("auth_session_revocation_reason")
 }
 
+/// BR-010. Every state the purchase request lifecycle defines, declared in full so the
+/// database never has to be migrated to admit a state the domain already knows about. The
+/// transitions a phase actually implements are an application concern; see
+/// apps/api/src/procurement/application/support/purchase-request-status.ts.
+enum PurchaseRequestStatus {
+  DRAFT
+  SUBMITTED
+  IN_QUOTATION
+  IN_FINAL_APPROVAL
+  APPROVED
+  ORDERED
+  REJECTED
+  CANCELLED
+
+  @@map("purchase_request_status")
+}
+
 model Organization {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name      String   @db.VarChar(200)
@@ -40,6 +57,8 @@ model Organization {
   users       User[]
   userRoles   UserRole[]
   authSessions AuthSession[]
+  purchaseRequests PurchaseRequest[]
+  purchaseRequestItems PurchaseRequestItem[]
 
   @@map("organizations")
 }
@@ -71,6 +90,7 @@ model Department {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   branch       Branch       @relation(fields: [organizationId, branchId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   users        User[]
+  purchaseRequests PurchaseRequest[]
 
   @@unique([organizationId, id], map: "departments_organization_id_id_key")
   @@unique([organizationId, branchId, id], map: "departments_organization_id_branch_id_id_key")
@@ -99,6 +119,7 @@ model User {
   department   Department   @relation(fields: [organizationId, branchId, departmentId], references: [organizationId, branchId, id], onDelete: Restrict, onUpdate: Restrict)
   roles        UserRole[]
   authSessions AuthSession[]
+  purchaseRequests PurchaseRequest[]
 
   @@unique([organizationId, id], map: "users_organization_id_id_key")
   @@map("users")
@@ -143,4 +164,68 @@ model AuthSession {
   @@index([organizationId, userId, issuedAt(sort: Desc)], map: "auth_sessions_organization_id_user_id_issued_at_idx")
   @@index([familyId], map: "auth_sessions_family_id_idx")
   @@map("auth_sessions")
+}
+
+/// A requester's statement of need (FR-020). Tenant-owned: `organization_id` is present on
+/// the row and on every relationship it takes part in, so PostgreSQL — not only application
+/// code — refuses a reference that crosses an Organization (ADR-002).
+model PurchaseRequest {
+  id             String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String                @map("organization_id") @db.Uuid
+  requesterId    String                @map("requester_id") @db.Uuid
+  /// BR-042. The requester's Department at creation time. Persisted on the request rather
+  /// than read through the User, so moving a person between Departments later cannot
+  /// retroactively reassign the requests they already raised.
+  departmentId   String                @map("department_id") @db.Uuid
+  status         PurchaseRequestStatus @default(DRAFT)
+  justification  String                @db.VarChar(2000)
+  /// Calendar date, not an instant: "needed by the 5th" is the same day in every timezone.
+  neededBy       DateTime              @map("needed_by") @db.Date
+  /// BR-031/BR-032. Integer centavos, computed by the backend from the items. BIGINT is a
+  /// storage width, not a business ceiling: it is the largest amount this system stores
+  /// exactly, and it reaches the wire as a string so no JSON number has to hold it.
+  estimatedTotalCents BigInt           @map("estimated_total_cents")
+  submittedAt    DateTime?             @map("submitted_at") @db.Timestamptz(3)
+  cancelledAt    DateTime?             @map("cancelled_at") @db.Timestamptz(3)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requester    User         @relation(fields: [organizationId, requesterId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  department   Department   @relation(fields: [organizationId, departmentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  items        PurchaseRequestItem[]
+
+  @@unique([organizationId, id], map: "purchase_requests_organization_id_id_key")
+  @@index([organizationId, requesterId, createdAt(sort: Desc), id(sort: Desc)], map: "purchase_requests_organization_id_requester_id_created_at_idx")
+  @@map("purchase_requests")
+}
+
+/// One line of a need (FR-021). It has no independent life: it exists only inside its
+/// PurchaseRequest, which is why the relationship cascades on delete.
+model PurchaseRequestItem {
+  id                String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String @map("organization_id") @db.Uuid
+  purchaseRequestId String @map("purchase_request_id") @db.Uuid
+  /// Server-assigned, 1-based. Gives the list a deterministic order that does not depend on
+  /// physical row order or on a client-supplied sort key.
+  position          Int
+  description       String @db.VarChar(500)
+  unitOfMeasure     String @map("unit_of_measure") @db.VarChar(20)
+  /// Exact decimal, never binary floating point. The scale of 3 is a technical
+  /// representation constraint — the precision the system keeps and round-trips — and not a
+  /// limit on how much may be requested. The application holds it as an integer count of
+  /// thousandths; see apps/api/src/procurement/application/support/decimal-quantity.ts.
+  quantity          Decimal @db.Decimal(20, 3)
+  /// BR-021/BR-031. The requester's expectation in integer centavos, never a purchase-order
+  /// price. BIGINT for the same storage reason as the request total.
+  estimatedUnitPriceCents BigInt @map("estimated_unit_price_cents")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "purchase_request_items_organization_id_id_key")
+  @@unique([organizationId, purchaseRequestId, position], map: "purchase_request_items_organization_id_request_id_position_key")
+  @@map("purchase_request_items")
 }

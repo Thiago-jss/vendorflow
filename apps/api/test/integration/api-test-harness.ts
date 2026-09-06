@@ -128,8 +128,22 @@ export class ApiIntegrationTestHarness {
     return this.send("GET", path, request);
   }
 
+  async put(
+    path: string,
+    request: HttpTestRequest = {},
+  ): Promise<HttpTestResponse> {
+    return this.send("PUT", path, request);
+  }
+
+  async delete(
+    path: string,
+    request: HttpTestRequest = {},
+  ): Promise<HttpTestResponse> {
+    return this.send("DELETE", path, request);
+  }
+
   private async send(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     request: HttpTestRequest,
   ): Promise<HttpTestResponse> {
@@ -161,10 +175,19 @@ export class ApiIntegrationTestHarness {
     });
 
     const rawBody = await response.text();
+    // Parsed only when the response says it is JSON. The documentation route serves HTML,
+    // and a blanket JSON.parse would turn "this endpoint returns a page" into a syntax error
+    // inside the harness rather than an assertion in the test.
+    const isJson = (response.headers.get("content-type") ?? "").includes(
+      "application/json",
+    );
 
     return {
       status: response.status,
-      body: rawBody.length === 0 ? undefined : (JSON.parse(rawBody) as unknown),
+      body:
+        rawBody.length === 0 || !isJson
+          ? undefined
+          : (JSON.parse(rawBody) as unknown),
       rawBody,
       setCookies: response.headers.getSetCookie(),
     };

@@ -47,6 +47,12 @@ export class PostgreSqlIntegrationTestHarness {
 
   async clean(): Promise<void> {
     await this.database.$transaction([
+      // Children before parents throughout: every foreign key here is RESTRICT except
+      // items -> requests, and relying on that one cascade would leave the order of the
+      // rest silently wrong the first time it changes.
+      this.database.purchaseRequestItem.deleteMany(),
+      // Requests hold RESTRICT foreign keys to users and departments.
+      this.database.purchaseRequest.deleteMany(),
       // Sessions first: they carry a RESTRICT foreign key to users.
       this.database.authSession.deleteMany(),
       this.database.userRole.deleteMany(),
