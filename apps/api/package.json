@@ -16,6 +16,7 @@
     "@nestjs/config": "4.0.2",
     "@nestjs/core": "11.1.6",
     "@nestjs/platform-express": "11.1.6",
+    "@nestjs/swagger": "11.4.7",
     "@nestjs/throttler": "6.5.0",
     "@vendorflow/database": "workspace:*",
     "argon2": "0.45.1",

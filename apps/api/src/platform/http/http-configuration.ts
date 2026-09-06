@@ -2,6 +2,7 @@ import { ValidationPipe, type INestApplication } from "@nestjs/common";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import type { Environment } from "../../config/env";
+import { configureOpenApi } from "./openapi";
 import { SanitizedExceptionFilter } from "./sanitized-exception.filter";
 
 /**
@@ -30,4 +31,9 @@ export function configureHttpApplication(
     }),
   );
   application.useGlobalFilters(new SanitizedExceptionFilter());
+  // After the pipes, so the document is built from the same application the pipeline runs.
+  // Configured here rather than only in `main.ts` for the same reason as everything else in
+  // this function: a contract that only exists in the production bootstrap is a contract no
+  // test can prove (NFR-009).
+  configureOpenApi(application);
 }

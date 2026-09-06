@@ -3,6 +3,7 @@ import { LoggerModule } from "nestjs-pino";
 import { ApplicationConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
 import { IdentityAccessModule } from "./identity-access/identity-access.module";
+import { ProcurementModule } from "./procurement/procurement.module";
 import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
 
 @Module({
@@ -27,6 +28,7 @@ import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
     }),
     TenantContextModule,
     IdentityAccessModule,
+    ProcurementModule,
     HealthModule,
   ],
 })
