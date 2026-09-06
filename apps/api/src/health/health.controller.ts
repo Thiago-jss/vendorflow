@@ -1,15 +1,18 @@
 import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
 import { DatabaseService } from "@vendorflow/database";
+import { Public } from "../platform/http/public-route.decorator";
 
 @Controller("health")
 export class HealthController {
   constructor(private readonly database: DatabaseService) {}
 
+  @Public()
   @Get()
   liveness(): { status: "ok" } {
     return { status: "ok" };
   }
 
+  @Public()
   @Get("ready")
   async readiness(): Promise<{ status: "ok" }> {
     if (!(await this.database.isHealthy())) {

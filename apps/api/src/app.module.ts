@@ -15,10 +15,9 @@ import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
           paths: [
             "req.headers.authorization",
             "req.headers.cookie",
-            "req.body.password",
-            "req.body.token",
-            "req.body.accessToken",
-            "req.body.refreshToken",
+            // The whole body, not selected fields: an auth body is credentials end to
+            // end, and a field-by-field list silently misses the next field added.
+            "req.body",
             "res.headers['set-cookie']",
           ],
           censor: "[REDACTED]",

@@ -47,6 +47,8 @@ export class PostgreSqlIntegrationTestHarness {
 
   async clean(): Promise<void> {
     await this.database.$transaction([
+      // Sessions first: they carry a RESTRICT foreign key to users.
+      this.database.authSession.deleteMany(),
       this.database.userRole.deleteMany(),
       this.database.user.deleteMany(),
       this.database.department.deleteMany(),
