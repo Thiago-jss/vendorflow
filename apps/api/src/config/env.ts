@@ -45,7 +45,15 @@ export const environmentSchema = z.object({
   AUTH_IP_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
   // Per-account failed-login limit, keyed by a digest of the normalized email.
   AUTH_ACCOUNT_MAX_FAILED_ATTEMPTS: z.coerce.number().int().positive().default(5),
-  AUTH_ACCOUNT_LOCKOUT_WINDOW_SECONDS: seconds(900)
+  AUTH_ACCOUNT_LOCKOUT_WINDOW_SECONDS: seconds(900),
+
+  // SEC-006. The Manager approval queue and decision routes, source-address dimension.
+  APPROVAL_IP_RATE_LIMIT: z.coerce.number().int().positive().default(60),
+  APPROVAL_IP_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
+  // Same two routes, authenticated-principal dimension. Lower than the address limit: one
+  // manager's own budget is smaller than what their whole office may share an address for.
+  APPROVAL_PRINCIPAL_RATE_LIMIT: z.coerce.number().int().positive().default(30),
+  APPROVAL_PRINCIPAL_RATE_LIMIT_WINDOW_SECONDS: seconds(60)
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

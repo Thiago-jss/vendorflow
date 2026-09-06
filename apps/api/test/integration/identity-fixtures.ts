@@ -99,3 +99,93 @@ export async function createTenant(
     password,
   };
 }
+
+export interface UserFixture {
+  readonly organizationId: string;
+  readonly branchId: string;
+  readonly departmentId: string;
+  readonly userId: string;
+  readonly email: string;
+  readonly password: string;
+}
+
+export interface CreateUserOptions {
+  readonly organizationId: string;
+  readonly branchId: string;
+  readonly departmentId: string;
+  readonly suffix: string;
+  readonly roles: readonly (
+    | "EMPLOYEE"
+    | "MANAGER"
+    | "BUYER"
+    | "FINANCE"
+    | "ADMIN"
+  )[];
+  readonly password?: string;
+  readonly isActive?: boolean;
+}
+
+/**
+ * A second Department inside an existing tenant. AUTHZ-004 makes the Department the manager's
+ * responsibility boundary, so proving that boundary needs at least two of them.
+ */
+export async function createDepartment(
+  database: DatabaseService,
+  tenant: Pick<TenantFixture, "organizationId" | "branchId">,
+  name: string,
+): Promise<string> {
+  const department = await database.department.create({
+    data: {
+      organizationId: tenant.organizationId,
+      branchId: tenant.branchId,
+      name,
+    },
+    select: { id: true },
+  });
+
+  return department.id;
+}
+
+/**
+ * Another person in an existing tenant, with an explicit role set and an explicit Department.
+ * Roles are not defaulted here on purpose: every test that creates a user is making a
+ * statement about what that user may do.
+ */
+export async function createUser(
+  database: DatabaseService,
+  options: CreateUserOptions,
+): Promise<UserFixture> {
+  const email = `user-${options.suffix.toLowerCase()}@example.com`;
+  const password = options.password ?? "correct horse battery staple";
+  const user = await database.user.create({
+    data: {
+      organizationId: options.organizationId,
+      branchId: options.branchId,
+      departmentId: options.departmentId,
+      name: `User ${options.suffix}`,
+      email,
+      isActive: options.isActive ?? true,
+      passwordHash: await hashPassword(password),
+    },
+    select: { id: true },
+  });
+
+  if (options.roles.length > 0) {
+    await database.userRole.createMany({
+      data: options.roles.map((role) => ({
+        organizationId: options.organizationId,
+        userId: user.id,
+        role,
+      })),
+    });
+  }
+
+  return {
+    organizationId: options.organizationId,
+    branchId: options.branchId,
+    departmentId: options.departmentId,
+    userId: user.id,
+    email,
+    password,
+  };
+}

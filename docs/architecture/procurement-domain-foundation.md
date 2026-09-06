@@ -1,14 +1,20 @@
 # Procurement Domain Foundation
 
 **Status:** Implemented foundation
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-06
 **Scope:** PurchaseRequest, PurchaseRequestItem, and the requester's half of the request
 state machine
 
 This document makes the `procurement` module of ADR-001 concrete for the requester's own
-purchase requests. It does not introduce approval, quotation, ordering, audit events, the
-outbox, or any user interface. Where a requirement depends on one of those, the gap is named
-below rather than simulated.
+purchase requests. It does not introduce quotation, ordering, the outbox, or any user
+interface. Where a requirement depends on one of those, the gap is named below rather than
+simulated.
+
+The approval ladder, the Manager decision and the audit trail arrived in the phase after this
+one and are documented separately in
+[`approval-workflow.md`](./approval-workflow.md). The statements below that they changed —
+the reachable states, the submission transaction, the HTTP surface — have been corrected here
+rather than left to contradict it.
 
 ## Model
 
@@ -120,31 +126,27 @@ rather than a value the server has to remember to ignore.
 BR-010's eight states all exist in the PostgreSQL enum. Declaring them now means a later
 phase adds *transitions*, not a migration.
 
-BR-011's full transition table is deliberately **not** implemented. This phase implements
-only the three edges a requester drives:
+BR-011's full transition table is still not implemented, and the edges that exist are split by
+**who drives them**. A requester submits and cancels; a decision on an approval step is the
+only other thing that moves a request today:
 
 ```text
-DRAFT      → SUBMITTED
-DRAFT      → CANCELLED
-SUBMITTED  → CANCELLED
+requester   DRAFT        → SUBMITTED
+requester   DRAFT        → CANCELLED
+requester   SUBMITTED    → CANCELLED
+requester   IN_QUOTATION → CANCELLED
+approval    SUBMITTED    → IN_QUOTATION
+approval    SUBMITTED    → REJECTED
 ```
 
-`SUBMITTED → IN_QUOTATION | REJECTED` and everything past it belong to actors and aggregates
-that do not exist yet. A state machine that declares edges nothing can drive is a state
-machine no test can prove, so each phase adds its own.
+The two tables are separate on purpose (`isRequesterTransitionAllowed` and
+`isApprovalTransitionAllowed`): conflating them is how a role check comes to stand in for a
+state check. Everything past `IN_QUOTATION` belongs to actors and aggregates that do not exist
+yet. A state machine that declares edges nothing can drive is a state machine no test can
+prove, so each phase adds its own.
 
-Two consequences worth stating plainly:
-
-- **SUBMITTED is a legitimate resting state in this phase.** Nothing advances it, because
-  nothing exists to advance it.
-- **FR-024 is only half implemented.** Submission computes and persists the estimated total
-  and the transition. It does *not* materialize an Approval Flow, because `ApprovalFlow` is
-  the subject of the next phase. No placeholder flow, synthetic step or fake event is
-  written: a fake approval structure would be harder to remove than the real one is to add.
-
-FR-026 is likewise partial by construction. A requester can read the current state of their
-own request. There is no pending step and no step history, and empty ones are not returned —
-that would be a contract the next phase has to break.
+`IN_QUOTATION → CANCELLED` is not a new rule — FR-025 and BR-013 always allowed cancellation
+before ORDERED. What changed is that `IN_QUOTATION` became reachable.
 
 ## Authorization
 
@@ -211,9 +213,11 @@ Every route is authenticated by the global default-deny guard. None is `@Public(
 | `GET` | `/purchase-requests` | `200` | Own requests, paginated. Query: `limit` (1…100, default 20), `cursor` |
 | `GET` | `/purchase-requests/{id}` | `200` | Own request with its items |
 | `PUT` | `/purchase-requests/{id}` | `200` | Replaces a DRAFT's editable content |
-| `POST` | `/purchase-requests/{id}/submit` | `200` | DRAFT → SUBMITTED |
-| `POST` | `/purchase-requests/{id}/cancel` | `200` | DRAFT or SUBMITTED → CANCELLED |
+| `POST` | `/purchase-requests/{id}/submit` | `200` | DRAFT → SUBMITTED, and materializes the approval flow |
+| `POST` | `/purchase-requests/{id}/cancel` | `200` | DRAFT, SUBMITTED or IN_QUOTATION → CANCELLED |
 | `DELETE` | `/purchase-requests/{id}` | `204` | Deletes a DRAFT |
+| `GET` | `/purchase-requests/awaiting-my-approval` | `200` | The caller's Manager queue — see [`approval-workflow.md`](./approval-workflow.md) |
+| `POST` | `/purchase-requests/{id}/approval-decision` | `200` | Decides the pending Manager step — same document |
 
 Item body fields: `description`, `unitOfMeasure`, `quantity` (decimal string),
 `estimatedUnitPriceCents` (integer-centavo string).
@@ -224,7 +228,7 @@ Failure mapping, uniform across every route:
 | --- | --- |
 | `400` | Malformed payload, unknown field, unusable pagination cursor, non-UUID identifier |
 | `401` | No usable access token |
-| `403` | Authenticated, but the principal does not hold EMPLOYEE (creation only) |
+| `403` | Authenticated, but the principal lacks the capability: EMPLOYEE to create, MANAGER to decide, or BR-005 self-approval |
 | `404` | Unknown, another requester's, or another tenant's identifier — indistinguishable |
 | `409` | The current state does not permit the action, or it changed underneath the caller |
 | `422` | Well-formed payload that a domain rule refuses (e.g. `2026-02-30`) |
@@ -291,21 +295,31 @@ and `infrastructure/{persistence,http}`. The application layer imports no infras
 no Prisma; the repository contract lives in `application/contracts` and its only
 implementation lives in `infrastructure/persistence`.
 
-The contract is not a mirror of Prisma. It exposes the seven operations the use cases
-actually perform, each scoped by construction — there is no read by identifier alone and no
-optional `organizationId`, so an unscoped query is not expressible.
+The contract is not a mirror of Prisma. It exposes the operations the use cases actually
+perform, each scoped by construction — there is no read by identifier alone and no optional
+`organizationId`, so an unscoped query is not expressible. Two of them are bounded by
+Department rather than by ownership (`findDepartmentRequest`, `listDepartmentRequests`); the
+boundary is a predicate there for exactly the same reason `requesterId` is one in the others.
 
-`procurement` reads exactly one thing it does not own: the requester's Department at creation
-time. `users` belongs to `identity-access`, so that read goes through
-`GetCurrentOrganizationContext`, the use case that module exports, rather than through a
-query from here (ADR-001, rule 2).
+`procurement` reads and writes nothing it does not own. It reaches three other modules through
+the interfaces they publish (ADR-001 rule 2):
+
+- `identity-access` for the Department a person belongs to — the requester's at creation time
+  (BR-042), and a decision maker's own when their responsibility boundary is evaluated;
+- `approval` for the BR-001 ladder;
+- `audit` for the append-only trail, in the emit direction only (ADR-001 rule 7).
+
+The transitions that span those modules are orchestrated here, with the aggregate whose
+lifecycle they are, inside one transaction supplied by `platform` (ADR-001 rule 4). See
+[`approval-workflow.md`](./approval-workflow.md).
 
 ## Verification
 
 Unit tests, no infrastructure (NFR-007):
 
-- the state machine — the three permitted edges, every refusal including the ones later
-  phases will add, terminal states, and BR-013;
+- the state machine — the permitted requester and approval edges, the fact that neither actor
+  drives the other's, every refusal including the ones later phases will add, terminal states,
+  and BR-013;
 - exact decimal quantity — parsing and formatting of fractional values, `0.1 + 0.2 === 0.3`
   in thousandths, magnitudes beyond `Number.MAX_SAFE_INTEGER`, refusal of every ambiguous
   representation, round-tripping, and the storage boundary: `99999999999999999.999` is
@@ -328,6 +342,7 @@ one of them:
 - lists exclude other tenants and other requesters, and keyset pagination neither repeats nor
   skips a row;
 - two concurrent submissions produce exactly one winner;
+- a submission whose audit write fails leaves no transition, no flow and no event;
 - an exact decimal quantity round-trips through `NUMERIC(20, 3)` — `0.100` and `0.200` come
   back as written — and an amount of 2^53 + 1 centavos is stored and read back exactly;
 - PostgreSQL itself rejects a cross-tenant requester, a cross-tenant department, and a
@@ -353,7 +368,7 @@ Authenticated HTTP tests over the real application:
 
 Generated-document tests (no database):
 
-- `/docs-json` lists all seven purchase request operations, their request and response
+- `/docs-json` lists all nine purchase request operations, their request and response
   schemas, their query parameters, their `400`/`401`/`403`/`404`/`409`/`422` outcomes, and
   the bearer security requirement on every one of them;
 - the schemas contain the wire types the domain accepts — `quantity` and every amount as
@@ -383,13 +398,12 @@ generated OpenAPI is the *contract*.
 
 ## Known gaps
 
-- **FR-024's Approval Flow is not implemented.** Submission persists the transition and the
-  total, and nothing else. See the state-machine section.
-- **FR-026's pending step and step history do not exist.** Only the current state is exposed.
-- **No audit event is written** for creation, submission, cancellation or draft deletion.
-  `AuditEvent` and the transactional outbox are ADR-003's subject.
-- **No idempotency key on submission.** A duplicate submission is already harmless — the
-  second one loses the compare-and-swap and gets `409` — but a genuine idempotency contract
+- **No audit event is written for draft creation, draft replacement or draft deletion.** The
+  four transitions that are audited are listed in
+  [`approval-workflow.md`](./approval-workflow.md); a draft is not one of them, because
+  AUD-001 does not list it.
+- **No idempotency key on submission or on a decision.** A duplicate is already harmless — the
+  second one loses the compare-and-swap and gets `409` — but a genuine REL-004 contract
   belongs with the outbox work.
 - **`identity-access` is documented thinly.** The generated document lists its routes because
   they are real Nest handlers, but they carry no operation summaries or response schemas yet.

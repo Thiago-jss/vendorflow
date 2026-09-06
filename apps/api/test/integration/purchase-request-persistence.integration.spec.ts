@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseService } from "@vendorflow/database";
 import type { PurchaseRequestListCursor } from "../../src/procurement/application/contracts/purchase-request.repository";
+import { PrismaTransactionRunner } from "../../src/platform/persistence/prisma-transaction-runner";
 import { PrismaPurchaseRequestRepository } from "../../src/procurement/infrastructure/persistence/prisma-purchase-request.repository";
 import {
   REQUESTER_CANCELLABLE_STATUSES,
@@ -38,6 +39,11 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
   let harness: PostgreSqlIntegrationTestHarness;
   let database: DatabaseService;
   let repository: PrismaPurchaseRequestRepository;
+  /**
+   * The transitions now commit together with an approval flow and an audit event, so they
+   * run inside a transaction their caller opens. Here that caller is the test.
+   */
+  let transactions: PrismaTransactionRunner;
   let organizationA: TenantFixture;
   let organizationB: TenantFixture;
   /** A second requester inside organization A: ownership is not the same rule as tenancy. */
@@ -47,6 +53,7 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
     harness = await PostgreSqlIntegrationTestHarness.start();
     database = harness.database;
     repository = new PrismaPurchaseRequestRepository(database);
+    transactions = new PrismaTransactionRunner(database);
   }, 180_000);
 
   beforeEach(async () => {
@@ -304,19 +311,23 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
     ).resolves.toBeNull();
 
     await expect(
-      repository.submitOwnRequest({
-        ...asOrganizationA,
-        submittedAt: new Date(),
-        submittableStatuses: SUBMITTABLE_STATUSES,
-      }),
+      transactions.run((scope) =>
+        repository.submitOwnRequest(scope, {
+          ...asOrganizationA,
+          submittedAt: new Date(),
+          submittableStatuses: SUBMITTABLE_STATUSES,
+        }),
+      ),
     ).resolves.toBeNull();
 
     await expect(
-      repository.cancelOwnRequest({
-        ...asOrganizationA,
-        cancelledAt: new Date(),
-        cancellableStatuses: REQUESTER_CANCELLABLE_STATUSES,
-      }),
+      transactions.run((scope) =>
+        repository.cancelOwnRequest(scope, {
+          ...asOrganizationA,
+          cancelledAt: new Date(),
+          cancellableStatuses: REQUESTER_CANCELLABLE_STATUSES,
+        }),
+      ),
     ).resolves.toBeNull();
 
     await expect(repository.deleteOwnDraft(asOrganizationA)).resolves.toBe(
@@ -345,8 +356,18 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
     };
 
     const [first, second] = await Promise.all([
-      repository.submitOwnRequest({ ...criteria, submittedAt: new Date() }),
-      repository.submitOwnRequest({ ...criteria, submittedAt: new Date() }),
+      transactions.run((scope) =>
+        repository.submitOwnRequest(scope, {
+          ...criteria,
+          submittedAt: new Date(),
+        }),
+      ),
+      transactions.run((scope) =>
+        repository.submitOwnRequest(scope, {
+          ...criteria,
+          submittedAt: new Date(),
+        }),
+      ),
     ]);
 
     expect([first, second].filter((result) => result !== null)).toHaveLength(1);
@@ -373,13 +394,15 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
 
   it("refuses to delete a request that is no longer a draft", async () => {
     const draft = await createDraftFor(organizationA);
-    await repository.submitOwnRequest({
-      organizationId: organizationA.organizationId,
-      requesterId: organizationA.userId,
-      purchaseRequestId: draft.id,
-      submittedAt: new Date(),
-      submittableStatuses: SUBMITTABLE_STATUSES,
-    });
+    await transactions.run((scope) =>
+      repository.submitOwnRequest(scope, {
+        organizationId: organizationA.organizationId,
+        requesterId: organizationA.userId,
+        purchaseRequestId: draft.id,
+        submittedAt: new Date(),
+        submittableStatuses: SUBMITTABLE_STATUSES,
+      }),
+    );
 
     await expect(
       repository.deleteOwnDraft({

@@ -59,6 +59,9 @@ model Organization {
   authSessions AuthSession[]
   purchaseRequests PurchaseRequest[]
   purchaseRequestItems PurchaseRequestItem[]
+  approvalFlows ApprovalFlow[]
+  approvalSteps ApprovalStep[]
+  auditEvents AuditEvent[]
 
   @@map("organizations")
 }
@@ -120,6 +123,8 @@ model User {
   roles        UserRole[]
   authSessions AuthSession[]
   purchaseRequests PurchaseRequest[]
+  decidedApprovalSteps ApprovalStep[]
+  auditEvents AuditEvent[]
 
   @@unique([organizationId, id], map: "users_organization_id_id_key")
   @@map("users")
@@ -194,9 +199,13 @@ model PurchaseRequest {
   requester    User         @relation(fields: [organizationId, requesterId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   department   Department   @relation(fields: [organizationId, departmentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   items        PurchaseRequestItem[]
+  approvalFlow ApprovalFlow?
+  approvalSteps ApprovalStep[]
 
   @@unique([organizationId, id], map: "purchase_requests_organization_id_id_key")
   @@index([organizationId, requesterId, createdAt(sort: Desc), id(sort: Desc)], map: "purchase_requests_organization_id_requester_id_created_at_idx")
+  /// FR-030. The manager queue: one department's requests in one state, newest first.
+  @@index([organizationId, departmentId, status, createdAt(sort: Desc), id(sort: Desc)], map: "purchase_requests_organization_id_department_id_status_idx")
   @@map("purchase_requests")
 }
 
@@ -228,4 +237,149 @@ model PurchaseRequestItem {
   @@unique([organizationId, id], map: "purchase_request_items_organization_id_id_key")
   @@unique([organizationId, purchaseRequestId, position], map: "purchase_request_items_organization_id_request_id_position_key")
   @@map("purchase_request_items")
+}
+
+/// The role a single Approval Step is assigned to (BR-001). Deliberately not `Role`: an
+/// approval step names a *responsibility in the flow*, and the principal role that may act
+/// on it is a separate mapping — Purchasing steps are decided by a BUYER. Collapsing the two
+/// would make the flow depend on the identity module's role vocabulary.
+enum ApprovalStepRole {
+  MANAGER
+  PURCHASING
+  FINANCE
+
+  @@map("approval_step_role")
+}
+
+/// The lifecycle of one Approval Step, stated explicitly rather than inferred from which
+/// timestamps happen to be null. `ACTIONABLE` is the single step a flow is waiting on;
+/// `PENDING` steps exist but may not be decided until the steps before them complete
+/// (FR-035). `VOIDED` records a step that will never be decided — a cancelled request, or a
+/// rejected flow — without deleting it (BR-003, AUD-003).
+enum ApprovalStepState {
+  PENDING
+  ACTIONABLE
+  APPROVED
+  REJECTED
+  VOIDED
+
+  @@map("approval_step_state")
+}
+
+/// `ACTIVE` while any step may still be decided, `COMPLETED` once every materialized step
+/// has been, `REJECTED` when a step refused the request, `VOIDED` when the request was
+/// cancelled before the flow finished.
+enum ApprovalFlowState {
+  ACTIVE
+  COMPLETED
+  REJECTED
+  VOIDED
+
+  @@map("approval_flow_state")
+}
+
+/// AUD-001, restricted to the transitions this phase can actually produce. A value is added
+/// when the action that emits it exists, not before.
+enum AuditEventType {
+  PURCHASE_REQUEST_SUBMITTED
+  PURCHASE_REQUEST_CANCELLED
+  APPROVAL_STEP_APPROVED
+  APPROVAL_STEP_REJECTED
+
+  @@map("audit_event_type")
+}
+
+/// The aggregate an Audit Event is filed under. All four events of this phase are facts
+/// about one PurchaseRequest, so the decision events name the request and carry the step's
+/// identity in their payload — that is what makes the decisions on a request reconstructable
+/// in one ordered read (AUD-005).
+enum AuditAggregateType {
+  PURCHASE_REQUEST
+
+  @@map("audit_aggregate_type")
+}
+
+/// FR-024. Materialized when a PurchaseRequest is submitted, in the same transaction as the
+/// transition, and never before: a flow without a submitted request is not a state the
+/// domain has.
+model ApprovalFlow {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String            @map("organization_id") @db.Uuid
+  purchaseRequestId String            @map("purchase_request_id") @db.Uuid
+  state             ApprovalFlowState @default(ACTIVE)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  steps           ApprovalStep[]
+
+  @@unique([organizationId, id], map: "approval_flows_organization_id_id_key")
+  /// Exactly one flow per request in this phase (FR-024). BR-003 extends an existing flow
+  /// rather than creating a second one.
+  @@unique([organizationId, purchaseRequestId], map: "approval_flows_organization_id_purchase_request_id_key")
+  /// Lets a step prove, in PostgreSQL, that it belongs to the same request as its flow.
+  @@unique([organizationId, id, purchaseRequestId], map: "approval_flows_organization_id_id_request_id_key")
+  @@map("approval_flows")
+}
+
+/// One required approval in the flow (BR-001). `sequence` is server-assigned, 1-based and
+/// gap-free at creation, so the order of the ladder never depends on physical row order.
+model ApprovalStep {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String            @map("organization_id") @db.Uuid
+  approvalFlowId    String            @map("approval_flow_id") @db.Uuid
+  /// Denormalized from the flow and proven equal to it by a composite foreign key, so a
+  /// step can be read for a request without joining through the flow.
+  purchaseRequestId String            @map("purchase_request_id") @db.Uuid
+  sequence          Int
+  role              ApprovalStepRole
+  state             ApprovalStepState @default(PENDING)
+  /// FR-036/BR-002. The amount this step was evaluated against, captured when the step was
+  /// materialized. Integer centavos, for the same reasons as every other amount (BR-031).
+  evaluatedAmountCents BigInt         @map("evaluated_amount_cents")
+  decidedById       String?           @map("decided_by_id") @db.Uuid
+  decidedAt         DateTime?         @map("decided_at") @db.Timestamptz(3)
+  /// FR-031. Mandatory for a rejection and at least 10 non-whitespace characters; optional
+  /// for an approval, and stored trimmed when given.
+  decisionReason    String?           @map("decision_reason") @db.VarChar(2000)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  approvalFlow    ApprovalFlow    @relation(fields: [organizationId, approvalFlowId, purchaseRequestId], references: [organizationId, id, purchaseRequestId], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  decidedBy       User?           @relation(fields: [organizationId, decidedById], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "approval_steps_organization_id_id_key")
+  @@unique([organizationId, approvalFlowId, sequence], map: "approval_steps_organization_id_flow_id_sequence_key")
+  @@index([organizationId, purchaseRequestId, sequence], map: "approval_steps_organization_id_request_id_sequence_idx")
+  @@map("approval_steps")
+}
+
+/// AUD-002. Append-only: the application has no update and no delete path, and a PostgreSQL
+/// trigger refuses both regardless of caller (AUD-003).
+model AuditEvent {
+  id             String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String             @map("organization_id") @db.Uuid
+  actorId        String             @map("actor_id") @db.Uuid
+  eventType      AuditEventType     @map("event_type")
+  aggregateType  AuditAggregateType @map("aggregate_type")
+  aggregateId    String             @map("aggregate_id") @db.Uuid
+  /// AUD-005. 1-based and unique per (organization, aggregate), assigned inside the same
+  /// transaction as the business change, so the events of one aggregate have one
+  /// unambiguous order that does not depend on clock resolution.
+  sequence       Int
+  occurredAt     DateTime           @map("occurred_at") @db.Timestamptz(3)
+  /// Typed at the emitting boundary; JSON here. Amounts inside it are digit *strings* for
+  /// the same reason they are strings on the wire: a JSON number is a double to every
+  /// reader (BR-031).
+  payload        Json
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor        User         @relation(fields: [organizationId, actorId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, aggregateType, aggregateId, sequence], map: "audit_events_organization_id_aggregate_sequence_key")
+  @@map("audit_events")
 }
