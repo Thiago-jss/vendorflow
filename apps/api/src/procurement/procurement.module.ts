@@ -6,6 +6,7 @@ import { ApprovalModule } from "../approval/approval.module";
 import { AuditModule } from "../audit/audit.module";
 import { IdentityAccessModule } from "../identity-access/identity-access.module";
 import { FixedWindowRateLimiter } from "../platform/rate-limiting/fixed-window-rate-limiter";
+import { OutboxModule } from "../platform/outbox/outbox.module";
 import { TransactionModule } from "../platform/persistence/transaction.module";
 import { TenantContextModule } from "../platform/tenancy/tenant-context.module";
 import {
@@ -40,6 +41,9 @@ import { PurchaseRequestsController } from "./infrastructure/http/controllers/pu
  *   the operations that module publishes (ADR-001 rule 2).
  * - `AuditModule` for the append-only trail. Emitting is the only direction available
  *   (ADR-001 rule 7).
+ * - `OutboxModule` for the committed intent to emit an outgoing fact (REL-002). Recording is
+ *   the only direction available: this module cannot publish, inspect or republish a message,
+ *   and it does not know a broker exists (ADR-003).
  *
  * The orchestration of a transition that spans all three lives here, with the aggregate whose
  * lifecycle it is: a submission is a request transition *and* its flow *and* its audit event,
@@ -58,6 +62,7 @@ import { PurchaseRequestsController } from "./infrastructure/http/controllers/pu
     IdentityAccessModule,
     ApprovalModule,
     AuditModule,
+    OutboxModule,
   ],
   controllers: [PurchaseRequestsController],
   providers: [

@@ -2,6 +2,7 @@ import { ValidationPipe, type INestApplication } from "@nestjs/common";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import type { Environment } from "../../config/env";
+import { correlationMiddleware } from "../correlation/correlation.middleware";
 import { configureOpenApi } from "./openapi";
 import { SanitizedExceptionFilter } from "./sanitized-exception.filter";
 
@@ -14,6 +15,9 @@ export function configureHttpApplication(
   application: INestApplication,
   environment: Pick<Environment, "CORS_ORIGINS">,
 ): void {
+  // First, so every later layer — including the error filter — runs inside a request that
+  // already has a correlation identifier bound to it (NFR-008).
+  application.use(correlationMiddleware);
   application.use(helmet());
   // Signed cookies are deliberately unused: the refresh token is opaque and its authority
   // comes from the server-side session row, not from a signature the client carries.

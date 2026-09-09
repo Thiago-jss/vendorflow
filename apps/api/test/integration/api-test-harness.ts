@@ -30,6 +30,8 @@ const DEFAULT_ENVIRONMENT: Readonly<Record<string, string>> = {
 
 export interface HttpTestResponse {
   readonly status: number;
+  /** Lower-cased response headers, so a test can assert on the correlation echo (NFR-008). */
+  readonly headers: Readonly<Record<string, string>>;
   readonly body: unknown;
   readonly rawBody: string;
   readonly setCookies: readonly string[];
@@ -188,6 +190,7 @@ export class ApiIntegrationTestHarness {
 
     return {
       status: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
       body:
         rawBody.length === 0 || !isJson
           ? undefined

@@ -8,6 +8,8 @@ import type {
   AuditEventRepository,
 } from "../../src/audit/application/contracts/audit-event.repository";
 import { RecordAuditEvent } from "../../src/audit/application/use-cases/record-audit-event";
+import { RecordOutgoingEvent } from "../../src/platform/outbox/application/use-cases/record-outgoing-event";
+import { PrismaOutboxMessageRepository } from "../../src/platform/outbox/infrastructure/persistence/prisma-outbox-message.repository";
 import { PrismaAuditEventRepository } from "../../src/audit/infrastructure/persistence/prisma-audit-event.repository";
 import { MaterializeApprovalFlow } from "../../src/approval/application/use-cases/materialize-approval-flow";
 import { PrismaApprovalFlowRepository } from "../../src/approval/infrastructure/persistence/prisma-approval-flow.repository";
@@ -90,6 +92,7 @@ describe("approval workflow persistence (PostgreSQL)", () => {
       transactions,
       new MaterializeApprovalFlow(approvalFlows),
       new RecordAuditEvent(auditRepository),
+      new RecordOutgoingEvent(new PrismaOutboxMessageRepository()),
     );
   }
 

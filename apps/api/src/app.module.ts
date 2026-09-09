@@ -4,6 +4,10 @@ import { ApplicationConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
 import { IdentityAccessModule } from "./identity-access/identity-access.module";
 import { ProcurementModule } from "./procurement/procurement.module";
+import {
+  CORRELATION_HEADER,
+  newCorrelationId,
+} from "./platform/correlation/correlation-context";
 import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
 
 @Module({
@@ -22,6 +26,22 @@ import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
             "res.headers['set-cookie']",
           ],
           censor: "[REDACTED]",
+        },
+        // NFR-008. The default generator is a per-process counter, which cannot identify a
+        // request across a restart, across two API instances, or in the outbox row a request
+        // leaves behind. A UUID can. `req.id` is reused when the correlation middleware has
+        // already minted one, so the log line and the message always agree.
+        genReqId: (request, response) => {
+          const existing = (request as { id?: unknown }).id;
+
+          if (typeof existing === "string") {
+            return existing;
+          }
+
+          const correlationId = newCorrelationId();
+          response.setHeader(CORRELATION_HEADER, correlationId);
+
+          return correlationId;
         },
         customProps: (request) => ({ correlationId: request.id }),
       },
