@@ -1,7 +1,8 @@
 import { Module } from "@nestjs/common";
 import { LoggerModule } from "nestjs-pino";
 import { ApplicationConfigModule } from "./config/config.module";
-import { RabbitMqModule } from "./messaging/rabbitmq.module";
+import { HealthModule } from "./health/health.module";
+import { OutboxModule } from "./outbox/outbox.module";
 
 @Module({
   imports: [
@@ -15,7 +16,8 @@ import { RabbitMqModule } from "./messaging/rabbitmq.module";
         }
       }
     }),
-    RabbitMqModule
+    OutboxModule,
+    HealthModule
   ]
 })
 export class AppModule {}

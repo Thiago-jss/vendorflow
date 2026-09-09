@@ -15,6 +15,7 @@ import type { ApprovalDecision } from "../../../approval/application/support/app
 import { DecideActionableApprovalStep } from "../../../approval/application/use-cases/decide-actionable-approval-step";
 import { GetApprovalFlowForRequest } from "../../../approval/application/use-cases/get-approval-flow-for-request";
 import { RecordAuditEvent } from "../../../audit/application/use-cases/record-audit-event";
+import { RecordOutgoingEvent } from "../../../platform/outbox/application/use-cases/record-outgoing-event";
 import {
   PurchaseRequestConcurrentlyModifiedError,
   PurchaseRequestNotFoundError,
@@ -30,6 +31,7 @@ import {
   purchaseRequestStatusAfterApprovalDecision,
 } from "../support/purchase-request-approval";
 import { approvalStepDecidedPayload } from "../support/purchase-request-audit";
+import { purchaseRequestApprovalDecidedEventPayload } from "../support/purchase-request-events";
 import {
   APPROVAL_DECIDABLE_STATUSES,
   isApprovalTransitionAllowed,
@@ -64,9 +66,14 @@ export interface PurchaseRequestApprovalDecisionInput {
  * them back — there is no path that commits a decided step without its request transition, or
  * either without its audit event (REL-001, AUD-004).
  *
- * Two managers deciding at once therefore produce exactly one decision, one transition and
- * one audit event: the second `UPDATE` re-checks `state = ACTIONABLE` under the row lock the
- * first one took, matches nothing, and takes its whole transaction down with it (REL-005).
+ * Two managers deciding at once therefore produce exactly one decision, one transition, one
+ * audit event and one outgoing intent: the second `UPDATE` re-checks `state = ACTIONABLE`
+ * under the row lock the first one took, matches nothing, and takes its whole transaction
+ * down with it (REL-005).
+ *
+ * The outgoing fact is recorded in that same transaction and is an intent, not a publication
+ * (REL-002). No broker is contacted here, so a decision commits whether or not RabbitMQ is
+ * reachable (REL-007).
  */
 @Injectable()
 export class DecidePurchaseRequestApproval {
@@ -81,6 +88,7 @@ export class DecidePurchaseRequestApproval {
     private readonly decideActionableApprovalStep: DecideActionableApprovalStep,
     private readonly getApprovalFlowForRequest: GetApprovalFlowForRequest,
     private readonly recordAuditEvent: RecordAuditEvent,
+    private readonly recordOutgoingEvent: RecordOutgoingEvent,
   ) {}
 
   async execute(
@@ -161,6 +169,22 @@ export class DecidePurchaseRequestApproval {
           step: decided.step,
           approvalFlowState: decided.flowState,
           resultingStatus: transitioned.status,
+        }),
+      });
+
+      await this.recordOutgoingEvent.execute(scope, principal, {
+        eventType: "PURCHASE_REQUEST_APPROVAL_DECIDED",
+        aggregateType: "PURCHASE_REQUEST",
+        aggregateId: transitioned.id,
+        occurredAt: decidedAt,
+        // Deliberately without the decision reason the audit payload above carries: free text
+        // a manager wrote about a colleague's request stays in tenant-scoped storage.
+        payload: purchaseRequestApprovalDecidedEventPayload({
+          step: decided.step,
+          approvalFlowState: decided.flowState,
+          resultingStatus: transitioned.status,
+          requesterId: transitioned.requesterId,
+          decidedById: principal.userId,
         }),
       });
 

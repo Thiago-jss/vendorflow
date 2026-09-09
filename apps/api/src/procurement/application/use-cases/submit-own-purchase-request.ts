@@ -4,6 +4,7 @@ import {
   TRANSACTION_RUNNER,
   type TransactionRunner,
 } from "../../../platform/persistence/transaction-scope";
+import { RecordOutgoingEvent } from "../../../platform/outbox/application/use-cases/record-outgoing-event";
 import { MaterializeApprovalFlow } from "../../../approval/application/use-cases/materialize-approval-flow";
 import { RecordAuditEvent } from "../../../audit/application/use-cases/record-audit-event";
 import {
@@ -18,6 +19,7 @@ import {
 } from "../contracts/purchase-request.repository";
 import type { PurchaseRequestView } from "../contracts/purchase-request-view";
 import { purchaseRequestSubmittedPayload } from "../support/purchase-request-audit";
+import { purchaseRequestSubmittedEventPayload } from "../support/purchase-request-events";
 import {
   SUBMITTABLE_STATUSES,
   isRequesterTransitionAllowed,
@@ -35,6 +37,12 @@ import {
  *
  * The ladder is materialized from the estimated total the transition itself returned, which
  * is the value PostgreSQL holds, not the one the caller read a moment earlier.
+ *
+ * The outgoing fact joins the same transaction (REL-002). It is a durable *intent*, not a
+ * publication: nothing here opens a channel, waits on a confirm or knows a broker exists, so
+ * RabbitMQ being down cannot decide whether a submission commits (REL-007). A submission that
+ * loses the compare-and-swap above leaves no intent, because the throw takes the whole
+ * transaction with it.
  */
 @Injectable()
 export class SubmitOwnPurchaseRequest {
@@ -45,6 +53,7 @@ export class SubmitOwnPurchaseRequest {
     private readonly transactionRunner: TransactionRunner,
     private readonly materializeApprovalFlow: MaterializeApprovalFlow,
     private readonly recordAuditEvent: RecordAuditEvent,
+    private readonly recordOutgoingEvent: RecordOutgoingEvent,
   ) {}
 
   async execute(
@@ -107,6 +116,20 @@ export class SubmitOwnPurchaseRequest {
         occurredAt: submittedAt,
         payload: purchaseRequestSubmittedPayload({
           estimatedTotalCents: request.estimatedTotalCents,
+          approvalFlowId: approvalFlow.id,
+          approvalStepCount: approvalFlow.steps.length,
+        }),
+      });
+
+      await this.recordOutgoingEvent.execute(scope, principal, {
+        eventType: "PURCHASE_REQUEST_SUBMITTED",
+        aggregateType: "PURCHASE_REQUEST",
+        aggregateId: request.id,
+        occurredAt: submittedAt,
+        payload: purchaseRequestSubmittedEventPayload({
+          estimatedTotalCents: request.estimatedTotalCents,
+          requesterId: request.requesterId,
+          departmentId: request.departmentId,
           approvalFlowId: approvalFlow.id,
           approvalStepCount: approvalFlow.steps.length,
         }),

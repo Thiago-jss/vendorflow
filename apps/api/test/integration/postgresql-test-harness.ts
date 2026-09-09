@@ -55,6 +55,11 @@ export class PostgreSqlIntegrationTestHarness {
       // Children before parents throughout: every foreign key here is RESTRICT except
       // items -> requests, and relying on that one cascade would leave the order of the
       // rest silently wrong the first time it changes.
+      // Outbox rows and consumer receipts hold RESTRICT foreign keys to organizations and
+      // nothing references them, so they go first. Unlike audit_events they are ordinary
+      // mutable rows, so an ordinary delete is enough.
+      this.database.outboxConsumerReceipt.deleteMany(),
+      this.database.outboxMessage.deleteMany(),
       this.database.approvalStep.deleteMany(),
       // Steps hold RESTRICT foreign keys to flows, requests and users.
       this.database.approvalFlow.deleteMany(),

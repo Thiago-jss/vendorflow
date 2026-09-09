@@ -62,6 +62,8 @@ model Organization {
   approvalFlows ApprovalFlow[]
   approvalSteps ApprovalStep[]
   auditEvents AuditEvent[]
+  outboxMessages OutboxMessage[]
+  outboxConsumerReceipts OutboxConsumerReceipt[]
 
   @@map("organizations")
 }
@@ -359,6 +361,122 @@ model ApprovalStep {
 
 /// AUD-002. Append-only: the application has no update and no delete path, and a PostgreSQL
 /// trigger refuses both regardless of caller (AUD-003).
+/// REL-002. The publication lifecycle of one committed outgoing fact. `PENDING` is claimable
+/// once `next_attempt_at` has passed; `PUBLISHING` is leased by exactly one relay instance;
+/// `PUBLISHED` is confirmed by the broker; `FAILED` has exhausted its bounded attempts and is
+/// parked for inspection rather than dropped (REL-006).
+enum OutboxMessageStatus {
+  PENDING
+  PUBLISHING
+  PUBLISHED
+  FAILED
+
+  @@map("outbox_message_status")
+}
+
+/// The outgoing facts this phase actually emits. Like `AuditEventType`, a value is added when
+/// the transition that emits it exists, not in anticipation of one.
+enum OutboxEventType {
+  PURCHASE_REQUEST_SUBMITTED
+  PURCHASE_REQUEST_APPROVAL_DECIDED
+
+  @@map("outbox_event_type")
+}
+
+/// The aggregate an outgoing fact is about. Separate from `AuditAggregateType` on purpose:
+/// the audit trail and the outbox are different concerns with different lifecycles, and
+/// sharing one enum would couple what may be audited to what may be published.
+enum OutboxAggregateType {
+  PURCHASE_REQUEST
+
+  @@map("outbox_aggregate_type")
+}
+
+/// REL-002's committed intent. Written in the *same* transaction as the business change and
+/// its audit event, so a rolled-back transition leaves no intent and a committed one cannot
+/// lose its side effect (ADR-003).
+///
+/// This table is **mutable operational state**, and deliberately carries none of the
+/// append-only protection `audit_events` has. A published row is a transport receipt, not
+/// history: the relay updates its status, its lease and its attempt counter throughout its
+/// life, and a later retention job may delete it. The audit trail is what must never change.
+///
+/// There is no `consumed_at`: publication and consumption are separate concerns, and one
+/// event may have several independent consumers. A consumer records its own receipt.
+model OutboxMessage {
+  /// The stable end-to-end event identity. It becomes the AMQP `messageId` and the durable
+  /// consumer deduplication key, so there is deliberately no second event identifier.
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String              @map("organization_id") @db.Uuid
+  eventType      OutboxEventType     @map("event_type")
+  /// Lets a consumer refuse a shape it does not understand instead of guessing at it.
+  schemaVersion  Int                 @default(1) @map("schema_version") @db.SmallInt
+  aggregateType  OutboxAggregateType @map("aggregate_type")
+  aggregateId    String              @map("aggregate_id") @db.Uuid
+  /// NFR-008. Carried from the originating request into the asynchronous continuation, so one
+  /// identifier links the API log line, the message and the consumer's log line.
+  correlationId  String              @map("correlation_id") @db.Uuid
+  occurredAt     DateTime            @map("occurred_at") @db.Timestamptz(3)
+  /// Scalars only, and every amount is a digit string rather than a JSON number (BR-031).
+  /// Justifications, decision reasons, names, emails and credentials never appear here.
+  payload        Json
+  status         OutboxMessageStatus @default(PENDING)
+  attemptCount   Int                 @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime            @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  /// The relay instance holding the publication lease, and when that lease expires. A relay
+  /// that dies mid-publication leaves an expired lease, which is what makes the row claimable
+  /// again without any separate reconciliation job.
+  leasedBy       String?             @map("leased_by") @db.VarChar(100)
+  leaseExpiresAt DateTime?           @map("lease_expires_at") @db.Timestamptz(3)
+  publishedAt    DateTime?           @map("published_at") @db.Timestamptz(3)
+  /// A short, non-sensitive diagnostic. Never a stack trace, a payload or a credential.
+  lastError      String?             @map("last_error") @db.VarChar(500)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "outbox_messages_organization_id_id_key")
+  /// The relay's claim scan. Deliberately *not* led by organization_id: this is a trusted
+  /// cross-tenant infrastructure sweep, not a product query, and the distinction is made
+  /// explicit by the separately named claim operation that is the only caller.
+  @@index([nextAttemptAt, createdAt, id], map: "outbox_messages_claimable_idx")
+  @@index([leaseExpiresAt], map: "outbox_messages_expired_lease_idx")
+  /// Investigation: what this tenant emitted about this aggregate, in order.
+  @@index([organizationId, aggregateType, aggregateId, createdAt], map: "outbox_messages_organization_id_aggregate_idx")
+  @@map("outbox_messages")
+}
+
+/// REL-003. One consumer's durable proof that it has already processed one event.
+///
+/// The primary key is the idempotency mechanism: a redelivered message loses the insert and
+/// the consumer produces no second effect. Broker redelivery semantics are not an idempotency
+/// mechanism and this table exists because they are not.
+///
+/// There is deliberately no foreign key to `outbox_messages`: a `RESTRICT` reference would
+/// make every receipt a reason its outbox row cannot be retained-and-pruned later, and a
+/// `CASCADE` would silently delete the proof that something was already processed. The
+/// consumer validates the originating row by `(organization_id, id)` instead.
+model OutboxConsumerReceipt {
+  /// Stable logical name of the consumer. Two consumers of the same event each keep their own
+  /// receipt, which is why the consumer is part of the key.
+  consumer       String   @db.VarChar(100)
+  /// `outbox_messages.id`, taken from the envelope and validated against the persisted row.
+  eventId        String   @map("event_id") @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  eventType      OutboxEventType @map("event_type")
+  /// How many times the broker had already delivered this message when it finally succeeded.
+  /// Operational evidence that redelivery happened and was absorbed, not a control field.
+  deliveryCount  Int      @default(1) @map("delivery_count")
+  processedAt    DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([consumer, eventId], map: "outbox_consumer_receipts_pkey")
+  @@index([organizationId, processedAt], map: "outbox_consumer_receipts_organization_id_processed_at_idx")
+  @@map("outbox_consumer_receipts")
+}
+
 model AuditEvent {
   id             String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizationId String             @map("organization_id") @db.Uuid
