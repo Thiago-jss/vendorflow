@@ -1,6 +1,12 @@
 import { Inject, Injectable } from "@nestjs/common";
 import type { TrustedPrincipal } from "../../../platform/tenancy/trusted-principal";
 import {
+  TRANSACTION_RUNNER,
+  type TransactionRunner,
+} from "../../../platform/persistence/transaction-scope";
+import { MaterializeApprovalFlow } from "../../../approval/application/use-cases/materialize-approval-flow";
+import { RecordAuditEvent } from "../../../audit/application/use-cases/record-audit-event";
+import {
   PurchaseRequestConcurrentlyModifiedError,
   PurchaseRequestNotFoundError,
   PurchaseRequestTransitionNotAllowedError,
@@ -8,34 +14,43 @@ import {
 } from "../contracts/purchase-request.errors";
 import {
   PURCHASE_REQUEST_REPOSITORY,
-  type PurchaseRequestRecord,
   type PurchaseRequestRepository,
 } from "../contracts/purchase-request.repository";
+import type { PurchaseRequestView } from "../contracts/purchase-request-view";
+import { purchaseRequestSubmittedPayload } from "../support/purchase-request-audit";
 import {
   SUBMITTABLE_STATUSES,
   isRequesterTransitionAllowed,
 } from "../support/purchase-request-status";
 
 /**
- * FR-023: DRAFT → SUBMITTED, by the requester and no one else.
+ * FR-023 and FR-024, which are one fact and not two: `DRAFT → SUBMITTED`, the BR-001 approval
+ * ladder the estimated total requires, and the audit event that records it all commit
+ * together or not at all (REL-001, AUD-004).
  *
- * FR-024 also asks submission to materialize an Approval Flow. ApprovalFlow does not exist
- * yet and is the subject of its own phase, so this use case persists the transition and
- * nothing more. It deliberately emits no event, writes no placeholder flow and creates no
- * synthetic step: a fake approval structure would be harder to remove than to add, and the
- * next phase needs the real one.
+ * The order inside the transaction matters. The conditional transition runs first, so a
+ * request that was submitted or cancelled between the read above and this write produces no
+ * flow and no audit event — the compare-and-swap is what decides, and everything after it is
+ * conditional on having won.
+ *
+ * The ladder is materialized from the estimated total the transition itself returned, which
+ * is the value PostgreSQL holds, not the one the caller read a moment earlier.
  */
 @Injectable()
 export class SubmitOwnPurchaseRequest {
   constructor(
     @Inject(PURCHASE_REQUEST_REPOSITORY)
     private readonly purchaseRequests: PurchaseRequestRepository,
+    @Inject(TRANSACTION_RUNNER)
+    private readonly transactionRunner: TransactionRunner,
+    private readonly materializeApprovalFlow: MaterializeApprovalFlow,
+    private readonly recordAuditEvent: RecordAuditEvent,
   ) {}
 
   async execute(
     principal: TrustedPrincipal,
     purchaseRequestId: string,
-  ): Promise<PurchaseRequestRecord> {
+  ): Promise<PurchaseRequestView> {
     const existing = await this.purchaseRequests.findOwnRequest({
       organizationId: principal.organizationId,
       requesterId: principal.userId,
@@ -62,18 +77,42 @@ export class SubmitOwnPurchaseRequest {
       );
     }
 
-    const submitted = await this.purchaseRequests.submitOwnRequest({
-      organizationId: principal.organizationId,
-      requesterId: principal.userId,
-      purchaseRequestId,
-      submittedAt: new Date(),
-      submittableStatuses: SUBMITTABLE_STATUSES,
+    const submittedAt = new Date();
+
+    return this.transactionRunner.run(async (scope) => {
+      const request = await this.purchaseRequests.submitOwnRequest(scope, {
+        organizationId: principal.organizationId,
+        requesterId: principal.userId,
+        purchaseRequestId,
+        submittedAt,
+        submittableStatuses: SUBMITTABLE_STATUSES,
+      });
+
+      if (request === null) {
+        // Thrown rather than returned, so the transaction rolls back and no half-written
+        // submission survives the race it lost.
+        throw new PurchaseRequestConcurrentlyModifiedError();
+      }
+
+      const approvalFlow = await this.materializeApprovalFlow.execute(scope, {
+        organizationId: principal.organizationId,
+        purchaseRequestId: request.id,
+        evaluatedAmountCents: request.estimatedTotalCents,
+      });
+
+      await this.recordAuditEvent.execute(scope, principal, {
+        eventType: "PURCHASE_REQUEST_SUBMITTED",
+        aggregateType: "PURCHASE_REQUEST",
+        aggregateId: request.id,
+        occurredAt: submittedAt,
+        payload: purchaseRequestSubmittedPayload({
+          estimatedTotalCents: request.estimatedTotalCents,
+          approvalFlowId: approvalFlow.id,
+          approvalStepCount: approvalFlow.steps.length,
+        }),
+      });
+
+      return { request, approvalFlow };
     });
-
-    if (submitted === null) {
-      throw new PurchaseRequestConcurrentlyModifiedError();
-    }
-
-    return submitted;
   }
 }

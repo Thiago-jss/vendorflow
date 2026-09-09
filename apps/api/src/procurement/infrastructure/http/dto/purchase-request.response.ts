@@ -2,9 +2,9 @@ import { ApiProperty } from "@nestjs/swagger";
 import { formatCalendarDate } from "../../../application/support/calendar-date";
 import type {
   PurchaseRequestPage,
-  PurchaseRequestRecord,
   PurchaseRequestSummaryRecord,
 } from "../../../application/contracts/purchase-request.repository";
+import type { PurchaseRequestView } from "../../../application/contracts/purchase-request-view";
 import {
   QUANTITY_DECIMAL_SCALE,
   formatQuantity,
@@ -15,6 +15,10 @@ import {
   type PurchaseRequestStatus,
 } from "../../../application/support/purchase-request-status";
 import { encodePurchaseRequestCursor } from "./purchase-request-cursor";
+import {
+  ApprovalFlowResponse,
+  toApprovalFlowResponse,
+} from "./purchase-request-approval.response";
 
 /**
  * The wire contract, declared separately from the persistence record so a column added to
@@ -105,6 +109,14 @@ export class PurchaseRequestResponse {
 
   @ApiProperty({ type: [PurchaseRequestItemResponse] })
   items!: PurchaseRequestItemResponse[];
+
+  @ApiProperty({
+    type: ApprovalFlowResponse,
+    nullable: true,
+    description:
+      "FR-026. The approval flow materialized at submission: the step it is waiting on and the full ordered history. Null while the request is a DRAFT, which has no flow.",
+  })
+  approval!: ApprovalFlowResponse | null;
 }
 
 /** A list row. The justification and the item lines stay out of a collection response. */
@@ -151,8 +163,10 @@ export class PurchaseRequestPageResponse {
 }
 
 export function toPurchaseRequestResponse(
-  record: PurchaseRequestRecord,
+  view: PurchaseRequestView,
 ): PurchaseRequestResponse {
+  const record = view.request;
+
   return {
     id: record.id,
     status: record.status,
@@ -174,6 +188,10 @@ export function toPurchaseRequestResponse(
       estimatedUnitPriceCents: formatCents(item.estimatedUnitPriceCents),
       estimatedLineTotalCents: formatCents(item.estimatedLineTotalCents),
     })),
+    approval:
+      view.approvalFlow === null
+        ? null
+        : toApprovalFlowResponse(view.approvalFlow),
   };
 }
 
@@ -181,7 +199,7 @@ export function toPurchaseRequestPageResponse(
   page: PurchaseRequestPage,
 ): PurchaseRequestPageResponse {
   return {
-    items: page.items.map((summary) => toSummaryResponse(summary)),
+    items: page.items.map((summary) => toPurchaseRequestSummaryResponse(summary)),
     nextCursor:
       page.nextCursor === null
         ? null
@@ -189,7 +207,7 @@ export function toPurchaseRequestPageResponse(
   };
 }
 
-function toSummaryResponse(
+export function toPurchaseRequestSummaryResponse(
   record: PurchaseRequestSummaryRecord,
 ): PurchaseRequestSummaryResponse {
   return {

@@ -117,8 +117,10 @@ describe("generated OpenAPI document", () => {
     ).toEqual([
       "DELETE /purchase-requests/{purchaseRequestId}",
       "GET /purchase-requests",
+      "GET /purchase-requests/awaiting-my-approval",
       "GET /purchase-requests/{purchaseRequestId}",
       "POST /purchase-requests",
+      "POST /purchase-requests/{purchaseRequestId}/approval-decision",
       "POST /purchase-requests/{purchaseRequestId}/cancel",
       "POST /purchase-requests/{purchaseRequestId}/submit",
       "PUT /purchase-requests/{purchaseRequestId}",
@@ -181,6 +183,7 @@ describe("generated OpenAPI document", () => {
 
     const response = schema("PurchaseRequestResponse");
     expect(Object.keys(response.properties ?? {}).sort()).toEqual([
+      "approval",
       "cancelledAt",
       "createdAt",
       "departmentId",
@@ -218,6 +221,117 @@ describe("generated OpenAPI document", () => {
       "#/components/schemas/PurchaseRequestSummaryResponse",
     );
     expect(page.properties?.nextCursor?.nullable).toBe(true);
+  });
+
+  it("documents the approval flow and step schemas the requester can read (FR-026)", () => {
+    const response = schema("PurchaseRequestResponse");
+    expect(response.properties?.approval?.nullable).toBe(true);
+
+    const flow = schema("ApprovalFlowResponse");
+    expect(Object.keys(flow.properties ?? {}).sort()).toEqual([
+      "id",
+      "pendingStep",
+      "state",
+      "steps",
+    ]);
+    expect(flow.properties?.state?.enum).toEqual([
+      "ACTIVE",
+      "COMPLETED",
+      "REJECTED",
+      "VOIDED",
+    ]);
+    expect(flow.properties?.pendingStep?.nullable).toBe(true);
+    expect(flow.properties?.steps?.items?.$ref).toBe(
+      "#/components/schemas/ApprovalStepResponse",
+    );
+
+    const step = schema("ApprovalStepResponse");
+    expect(Object.keys(step.properties ?? {}).sort()).toEqual([
+      "decidedAt",
+      "decidedById",
+      "decisionReason",
+      "evaluatedAmountCents",
+      "id",
+      "role",
+      "sequence",
+      "state",
+    ]);
+    // FR-036's amount is a string for the same reason every other amount is.
+    expect(step.properties?.evaluatedAmountCents?.type).toBe("string");
+    expect(step.properties?.role?.enum).toEqual([
+      "MANAGER",
+      "PURCHASING",
+      "FINANCE",
+    ]);
+    expect(step.properties?.state?.enum).toEqual([
+      "PENDING",
+      "ACTIONABLE",
+      "APPROVED",
+      "REJECTED",
+      "VOIDED",
+    ]);
+  });
+
+  it("documents the decision command as a closed world of two fields", () => {
+    const decide = operation(
+      "/purchase-requests/{purchaseRequestId}/approval-decision",
+      "post",
+    );
+
+    expect(decide.requestBody?.content["application/json"]?.schema.$ref).toBe(
+      "#/components/schemas/ApprovalDecisionDto",
+    );
+
+    const body = schema("ApprovalDecisionDto");
+    expect(Object.keys(body.properties ?? {}).sort()).toEqual([
+      "decision",
+      "reason",
+    ]);
+    expect(body.required).toEqual(["decision"]);
+    expect(body.properties?.decision?.enum).toEqual(["APPROVED", "REJECTED"]);
+
+    // Nothing the server owns is expressible: not the step, not the actor, not the amount,
+    // not the resulting status (MT-003, AUTHZ-005).
+    for (const forbidden of [
+      "approvalStepId",
+      "organizationId",
+      "decidedById",
+      "status",
+      "evaluatedAmountCents",
+      "sequence",
+      "role",
+      "roles",
+    ]) {
+      expect(Object.keys(body.properties ?? {})).not.toContain(forbidden);
+    }
+  });
+
+  it("documents the manager queue and its keyset page", () => {
+    const queue = operation("/purchase-requests/awaiting-my-approval", "get");
+
+    expect(
+      queue.responses["200"]?.content?.["application/json"]?.schema.$ref,
+    ).toBe("#/components/schemas/PurchaseRequestApprovalQueueResponse");
+    expect(
+      (queue.parameters ?? [])
+        .filter((parameter) => parameter.in === "query")
+        .map((parameter) => parameter.name)
+        .sort(),
+    ).toEqual(["cursor", "limit"]);
+
+    const page = schema("PurchaseRequestApprovalQueueResponse");
+    expect(page.properties?.items?.items?.$ref).toBe(
+      "#/components/schemas/PurchaseRequestApprovalQueueItemResponse",
+    );
+    expect(page.properties?.nextCursor?.nullable).toBe(true);
+
+    const item = schema("PurchaseRequestApprovalQueueItemResponse");
+    expect(item.properties?.request?.$ref).toBe(
+      "#/components/schemas/PurchaseRequestSummaryResponse",
+    );
+    expect(item.properties?.pendingStep?.$ref).toBe(
+      "#/components/schemas/ApprovalStepResponse",
+    );
   });
 
   it("documents the paginated list parameters", () => {
@@ -258,6 +372,37 @@ describe("generated OpenAPI document", () => {
         operation("/purchase-requests/{purchaseRequestId}", "delete").responses,
       ).sort(),
     ).toEqual(["204", "401", "404", "409"]);
+
+    // Every controlled outcome the decision command can actually produce, including the two
+    // that are security-relevant: 403 for a capability or self-approval denial, 404 for
+    // anything outside the caller's department or tenant.
+    expect(
+      Object.keys(
+        operation(
+          "/purchase-requests/{purchaseRequestId}/approval-decision",
+          "post",
+        ).responses,
+      ).sort(),
+    ).toEqual(["200", "400", "401", "403", "404", "409", "422", "429"]);
+
+    expect(
+      Object.keys(
+        operation("/purchase-requests/awaiting-my-approval", "get").responses,
+      ).sort(),
+    ).toEqual(["200", "400", "401", "403", "404", "429"]);
+  });
+
+  it("explains the security-relevant behaviour of the decision command", () => {
+    const decide = operation(
+      "/purchase-requests/{purchaseRequestId}/approval-decision",
+      "post",
+    );
+
+    // NFR-009: the generated document, not a Markdown file, is where a client reads why a
+    // 403 and a 404 mean different things here.
+    expect(decide.responses["403"]?.description).toContain("BR-005");
+    expect(decide.responses["404"]?.description).toContain("indistinguishable");
+    expect(decide.responses["409"]?.description).toContain("concurrent");
   });
 
   it("marks every purchase request operation as requiring the bearer scheme", () => {

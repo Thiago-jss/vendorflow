@@ -1,8 +1,13 @@
 import { Injectable } from "@nestjs/common";
 import { DatabaseService, Prisma } from "@vendorflow/database";
+import { transactionClient } from "../../../platform/persistence/prisma-transaction-runner";
+import type { TransactionScope } from "../../../platform/persistence/transaction-scope";
 import type {
+  ApplyApprovalDecisionInput,
   CancelPurchaseRequestInput,
   CreatePurchaseRequestDraftInput,
+  DepartmentPurchaseRequestCriteria,
+  ListDepartmentPurchaseRequestsCriteria,
   ListOwnPurchaseRequestsCriteria,
   OwnPurchaseRequestCriteria,
   PurchaseRequestPage,
@@ -121,6 +126,26 @@ export class PrismaPurchaseRequestRepository
     return request === null ? null : toRecord(request);
   }
 
+  async findDepartmentRequest(
+    criteria: DepartmentPurchaseRequestCriteria,
+  ): Promise<PurchaseRequestRecord | null> {
+    // AUTHZ-004. Tenant, resource and responsibility boundary are all in the predicate, so a
+    // request belonging to another department — or another organization — is never loaded and
+    // answers exactly as an unknown identifier does.
+    const request = await this.database.purchaseRequest.findUnique({
+      where: {
+        organizationId_id: {
+          organizationId: criteria.organizationId,
+          id: criteria.purchaseRequestId,
+        },
+        departmentId: criteria.departmentId,
+      },
+      select: REQUEST_SELECTION,
+    });
+
+    return request === null ? null : toRecord(request);
+  }
+
   async listOwnRequests(
     criteria: ListOwnPurchaseRequestsCriteria,
   ): Promise<PurchaseRequestPage> {
@@ -147,16 +172,39 @@ export class PrismaPurchaseRequestRepository
       select: SUMMARY_SELECTION,
     });
 
-    const page = rows.slice(0, criteria.limit).map((row) => toSummary(row));
-    const last = page.at(-1);
+    return toPage(rows, criteria.limit);
+  }
 
-    return {
-      items: page,
-      nextCursor:
-        rows.length > criteria.limit && last !== undefined
-          ? { createdAt: last.createdAt, id: last.id }
-          : null,
-    };
+  async listDepartmentRequests(
+    criteria: ListDepartmentPurchaseRequestsCriteria,
+  ): Promise<PurchaseRequestPage> {
+    // Same keyset ordering and the same tenant-leading shape as the requester's own list;
+    // only the boundary differs, and it is a predicate rather than a filter applied after the
+    // fact. The status set is the caller's, so the queue cannot be widened from the wire.
+    const after = criteria.after;
+    const rows = await this.database.purchaseRequest.findMany({
+      where: {
+        organizationId: criteria.organizationId,
+        departmentId: criteria.departmentId,
+        status: { in: criteria.statuses.map(toPurchaseRequestStatus) },
+        ...(criteria.excludingRequesterId === null
+          ? {}
+          : { requesterId: { not: criteria.excludingRequesterId } }),
+        ...(after === null
+          ? {}
+          : {
+              OR: [
+                { createdAt: { lt: after.createdAt } },
+                { createdAt: after.createdAt, id: { lt: after.id } },
+              ],
+            }),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: criteria.limit + 1,
+      select: SUMMARY_SELECTION,
+    });
+
+    return toPage(rows, criteria.limit);
   }
 
   async replaceOwnDraft(
@@ -221,22 +269,49 @@ export class PrismaPurchaseRequestRepository
   }
 
   async submitOwnRequest(
+    scope: TransactionScope,
     input: SubmitPurchaseRequestInput,
   ): Promise<PurchaseRequestRecord | null> {
-    return this.transition({
-      criteria: input,
+    return this.transition(scope, {
+      identity: {
+        id: input.purchaseRequestId,
+        organizationId: input.organizationId,
+        requesterId: input.requesterId,
+      },
       fromStatuses: input.submittableStatuses,
       data: { status: "SUBMITTED", submittedAt: input.submittedAt },
     });
   }
 
   async cancelOwnRequest(
+    scope: TransactionScope,
     input: CancelPurchaseRequestInput,
   ): Promise<PurchaseRequestRecord | null> {
-    return this.transition({
-      criteria: input,
+    return this.transition(scope, {
+      identity: {
+        id: input.purchaseRequestId,
+        organizationId: input.organizationId,
+        requesterId: input.requesterId,
+      },
       fromStatuses: input.cancellableStatuses,
       data: { status: "CANCELLED", cancelledAt: input.cancelledAt },
+    });
+  }
+
+  async applyApprovalDecision(
+    scope: TransactionScope,
+    input: ApplyApprovalDecisionInput,
+  ): Promise<PurchaseRequestRecord | null> {
+    return this.transition(scope, {
+      // The department is restated inside the write, not only in the read that preceded it:
+      // the responsibility boundary is part of the predicate that decides the row (AUTHZ-004).
+      identity: {
+        id: input.purchaseRequestId,
+        organizationId: input.organizationId,
+        departmentId: input.departmentId,
+      },
+      fromStatuses: input.fromStatuses,
+      data: { status: toPurchaseRequestStatus(input.toStatus) },
     });
   }
 
@@ -256,46 +331,75 @@ export class PrismaPurchaseRequestRepository
   }
 
   /**
-   * One conditional UPDATE decides every requester-driven transition. The permitted source
-   * states are in the WHERE clause rather than checked beforehand, so two concurrent
-   * commands cannot both observe the same state and both succeed (AUTHZ-005).
+   * One conditional UPDATE decides every transition, whoever drives it. The permitted source
+   * states are in the WHERE clause rather than checked beforehand, so two concurrent commands
+   * cannot both observe the same state and both succeed (AUTHZ-005, REL-005).
+   *
+   * `identity` carries whatever bounds the actor — the requester for an owned command, the
+   * department for an approval decision — and the same predicate is used for the re-read, so
+   * the row that comes back is provably the row that was written.
+   *
+   * It runs inside the caller's transaction. The transition is never the whole business
+   * change: the approval flow and the audit event that accompany it must commit or roll back
+   * with it (REL-001, AUD-004).
    */
-  private async transition(input: {
-    readonly criteria: OwnPurchaseRequestCriteria;
-    readonly fromStatuses: readonly string[];
-    readonly data: Prisma.PurchaseRequestUpdateManyMutationInput;
-  }): Promise<PurchaseRequestRecord | null> {
-    const { criteria } = input;
-
-    return this.database.$transaction(async (transaction) => {
-      const updated = await transaction.purchaseRequest.updateMany({
-        where: {
-          id: criteria.purchaseRequestId,
-          organizationId: criteria.organizationId,
-          requesterId: criteria.requesterId,
-          status: { in: input.fromStatuses.map(toPurchaseRequestStatus) },
-        },
-        data: input.data,
-      });
-
-      if (updated.count !== 1) {
-        return null;
-      }
-
-      const request = await transaction.purchaseRequest.findUnique({
-        where: {
-          organizationId_id: {
-            organizationId: criteria.organizationId,
-            id: criteria.purchaseRequestId,
-          },
-          requesterId: criteria.requesterId,
-        },
-        select: REQUEST_SELECTION,
-      });
-
-      return request === null ? null : toRecord(request);
+  private async transition(
+    scope: TransactionScope,
+    input: {
+      readonly identity: {
+        readonly id: string;
+        readonly organizationId: string;
+        readonly requesterId?: string;
+        readonly departmentId?: string;
+      };
+      readonly fromStatuses: readonly string[];
+      readonly data: Prisma.PurchaseRequestUpdateManyMutationInput;
+    },
+  ): Promise<PurchaseRequestRecord | null> {
+    const transaction = transactionClient(scope);
+    const { identity } = input;
+    const updated = await transaction.purchaseRequest.updateMany({
+      where: {
+        ...identity,
+        status: { in: input.fromStatuses.map(toPurchaseRequestStatus) },
+      },
+      data: input.data,
     });
+
+    if (updated.count !== 1) {
+      return null;
+    }
+
+    const request = await transaction.purchaseRequest.findUnique({
+      where: {
+        organizationId_id: {
+          organizationId: identity.organizationId,
+          id: identity.id,
+        },
+        requesterId: identity.requesterId,
+        departmentId: identity.departmentId,
+      },
+      select: REQUEST_SELECTION,
+    });
+
+    return request === null ? null : toRecord(request);
   }
+}
+
+function toPage(
+  rows: readonly PurchaseRequestSummaryRow[],
+  limit: number,
+): PurchaseRequestPage {
+  const page = rows.slice(0, limit).map((row) => toSummary(row));
+  const last = page.at(-1);
+
+  return {
+    items: page,
+    nextCursor:
+      rows.length > limit && last !== undefined
+        ? { createdAt: last.createdAt, id: last.id }
+        : null,
+  };
 }
 
 function itemData(

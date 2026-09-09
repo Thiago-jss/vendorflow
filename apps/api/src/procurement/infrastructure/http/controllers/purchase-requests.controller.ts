@@ -16,6 +16,7 @@ import {
   Put,
   Query,
   UnprocessableEntityException,
+  UseGuards,
 } from "@nestjs/common";
 import {
   ApiBearerAuth,
@@ -29,10 +30,17 @@ import {
   ApiOperation,
   ApiParam,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
   ApiUnprocessableEntityResponse,
 } from "@nestjs/swagger";
 import { OPENAPI_BEARER_SCHEME } from "../../../../platform/http/openapi";
+import {
+  ApprovalActionNotAuthorizedError,
+  ApprovalDecisionValidationError,
+  ApprovalStepNotActionableError,
+  SelfApprovalNotAllowedError,
+} from "../../../../approval/application/contracts/approval.errors";
 import {
   TENANT_CONTEXT,
   type TenantContext,
@@ -45,7 +53,10 @@ import {
   PurchaseRequestTransitionNotAllowedError,
   PurchaseRequestValidationError,
 } from "../../../application/contracts/purchase-request.errors";
+import { ApprovalRateLimitGuard } from "../guards/approval-rate-limit.guard";
 import { CancelOwnPurchaseRequest } from "../../../application/use-cases/cancel-own-purchase-request";
+import { DecidePurchaseRequestApproval } from "../../../application/use-cases/decide-purchase-request-approval";
+import { ListDepartmentApprovalQueue } from "../../../application/use-cases/list-department-approval-queue";
 import { CreatePurchaseRequestDraft } from "../../../application/use-cases/create-purchase-request-draft";
 import { DeleteOwnPurchaseRequestDraft } from "../../../application/use-cases/delete-own-purchase-request-draft";
 import { GetOwnPurchaseRequest } from "../../../application/use-cases/get-own-purchase-request";
@@ -53,6 +64,7 @@ import { ListOwnPurchaseRequests } from "../../../application/use-cases/list-own
 import { SubmitOwnPurchaseRequest } from "../../../application/use-cases/submit-own-purchase-request";
 import { UpdateOwnPurchaseRequestDraft } from "../../../application/use-cases/update-own-purchase-request-draft";
 import { CurrentOrganizationContextNotFoundError } from "../../../../identity-access/application/use-cases/get-current-organization-context";
+import { ApprovalDecisionDto } from "../dto/approval-decision.dto";
 import { ListPurchaseRequestsQueryDto } from "../dto/list-purchase-requests.dto";
 import { PurchaseRequestDraftDto } from "../dto/purchase-request-draft.dto";
 import { decodePurchaseRequestCursor } from "../dto/purchase-request-cursor";
@@ -62,6 +74,10 @@ import {
   toPurchaseRequestPageResponse,
   toPurchaseRequestResponse,
 } from "../dto/purchase-request.response";
+import {
+  PurchaseRequestApprovalQueueResponse,
+  toPurchaseRequestApprovalQueueResponse,
+} from "../dto/purchase-request-approval-queue.response";
 
 /**
  * The requester's own purchase requests.
@@ -93,6 +109,8 @@ export class PurchaseRequestsController {
     private readonly submitOwnPurchaseRequest: SubmitOwnPurchaseRequest,
     private readonly cancelOwnPurchaseRequest: CancelOwnPurchaseRequest,
     private readonly deleteOwnPurchaseRequestDraft: DeleteOwnPurchaseRequestDraft,
+    private readonly listDepartmentApprovalQueue: ListDepartmentApprovalQueue,
+    private readonly decidePurchaseRequestApproval: DecidePurchaseRequestApproval,
   ) {}
 
   @Post()
@@ -117,12 +135,15 @@ export class PurchaseRequestsController {
     @Body() body: PurchaseRequestDraftDto,
   ): Promise<PurchaseRequestResponse> {
     return this.run(async () =>
-      toPurchaseRequestResponse(
-        await this.createPurchaseRequestDraft.execute(
+      toPurchaseRequestResponse({
+        // A DRAFT has no approval flow: FR-024 materializes one at submission, and returning
+        // an empty one here would be a shape that means nothing.
+        request: await this.createPurchaseRequestDraft.execute(
           this.tenantContext.getPrincipal(),
           body,
         ),
-      ),
+        approvalFlow: null,
+      }),
     );
   }
 
@@ -155,11 +176,59 @@ export class PurchaseRequestsController {
     );
   }
 
+  /**
+   * Declared before `:purchaseRequestId`, so this literal segment is matched as a route and
+   * never as a request identifier. Nest resolves routes in declaration order within a
+   * controller, which is why both live here rather than in two controllers whose relative
+   * order would depend on module import order.
+   */
+  @Get("awaiting-my-approval")
+  @UseGuards(ApprovalRateLimitGuard)
+  @ApiOperation({
+    summary: "The caller's pending Manager approval queue",
+    description:
+      "FR-030. Requests in SUBMITTED, inside the caller's own Department, waiting on a Manager step. Requires the MANAGER role; ADMIN is not a bypass (AUTHZ-007). The organization comes from the access token and the department from the caller's persisted membership, so neither can be widened from the query string. The caller's own requests are excluded: BR-005 forbids them from deciding those.",
+  })
+  @ApiOkResponse({ type: PurchaseRequestApprovalQueueResponse })
+  @ApiBadRequestResponse({
+    description: "Page size out of range, unknown query parameter, or an unusable cursor.",
+  })
+  @ApiForbiddenResponse({
+    description:
+      "Authenticated, but the principal does not hold MANAGER. Names no resource, so it confirms nothing about what exists.",
+  })
+  @ApiNotFoundResponse({
+    description:
+      "The caller's own organization membership is no longer readable, so nothing is in scope.",
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      "SEC-006. The caller's address or account budget for this route is spent. Nothing is read.",
+  })
+  async listApprovalQueue(
+    @Query() query: ListPurchaseRequestsQueryDto,
+  ): Promise<PurchaseRequestApprovalQueueResponse> {
+    return this.run(async () =>
+      toPurchaseRequestApprovalQueueResponse(
+        await this.listDepartmentApprovalQueue.execute(
+          this.tenantContext.getPrincipal(),
+          {
+            limit: query.limit,
+            after:
+              query.cursor === undefined
+                ? null
+                : decodePurchaseRequestCursor(query.cursor),
+          },
+        ),
+      ),
+    );
+  }
+
   @Get(":purchaseRequestId")
   @ApiOperation({
     summary: "Read one of the caller's own purchase requests",
     description:
-      "FR-026, for the part of it that exists in this phase: the current state. There is no pending approval step or step history yet.",
+      "FR-026. The current state, the approval step the request is waiting on, and the full ordered step history with each decision's actor, reason, evaluated amount and timestamp. `approval` is null while the request is a DRAFT.",
   })
   @ApiParam({ name: "purchaseRequestId", format: "uuid" })
   @ApiOkResponse({ type: PurchaseRequestResponse })
@@ -204,13 +273,14 @@ export class PurchaseRequestsController {
     @Body() body: PurchaseRequestDraftDto,
   ): Promise<PurchaseRequestResponse> {
     return this.run(async () =>
-      toPurchaseRequestResponse(
-        await this.updateOwnPurchaseRequestDraft.execute(
+      toPurchaseRequestResponse({
+        request: await this.updateOwnPurchaseRequestDraft.execute(
           this.tenantContext.getPrincipal(),
           purchaseRequestId,
           body,
         ),
-      ),
+        approvalFlow: null,
+      }),
     );
   }
 
@@ -219,7 +289,7 @@ export class PurchaseRequestsController {
   @ApiOperation({
     summary: "Submit a DRAFT",
     description:
-      "FR-023. DRAFT to SUBMITTED, by the requester only. This phase persists the transition and the computed total; FR-024's Approval Flow belongs to a later phase.",
+      "FR-023/FR-024. DRAFT to SUBMITTED, by the requester only. The transition, the Approval Flow's materialization (BR-001) against the computed total, and the audit event all commit in the same transaction — a request never has a status of SUBMITTED without its approval ladder.",
   })
   @ApiParam({ name: "purchaseRequestId", format: "uuid" })
   @ApiOkResponse({ type: PurchaseRequestResponse })
@@ -247,7 +317,7 @@ export class PurchaseRequestsController {
   @ApiOperation({
     summary: "Cancel the caller's own request",
     description:
-      "FR-025 and BR-013. Permitted from DRAFT and SUBMITTED, the only states reachable in this phase, and never once ORDERED.",
+      "FR-025 and BR-013. Permitted from DRAFT, SUBMITTED and IN_QUOTATION, the states reachable in this phase, and never once ORDERED. An unfinished approval flow is voided along with every step still awaiting a decision; decisions already recorded, and a flow that had already finished, are left exactly as they are (AUD-003).",
   })
   @ApiParam({ name: "purchaseRequestId", format: "uuid" })
   @ApiOkResponse({ type: PurchaseRequestResponse })
@@ -264,6 +334,68 @@ export class PurchaseRequestsController {
         await this.cancelOwnPurchaseRequest.execute(
           this.tenantContext.getPrincipal(),
           purchaseRequestId,
+        ),
+      ),
+    );
+  }
+
+  @Post(":purchaseRequestId/approval-decision")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ApprovalRateLimitGuard)
+  @ApiOperation({
+    summary: "Decide the pending Manager approval step",
+    description: [
+      "FR-031/FR-032. Approving moves the request SUBMITTED -> IN_QUOTATION; rejecting moves",
+      "it to REJECTED, which is terminal (BR-004). The decision is final: there is no",
+      "un-approve and no second decision (BR-006).",
+      "",
+      "Only the step the flow is currently waiting on can be decided, and only by a principal",
+      "holding the role that step is assigned to (AUTHZ-006). A Purchasing or Finance step is",
+      "never actionable here — BR-002 evaluates those against the selected quote total.",
+      "",
+      "403 is returned for a capability denial (no MANAGER role) and for self-approval",
+      "(BR-005), and names no resource. 404 covers an unknown identifier, another tenant's and",
+      "another department's alike, so none of them can be told apart (MT-004, AUTHZ-004).",
+      "409 means there was nothing actionable to decide, or a concurrent decision won the",
+      "race; the loser writes nothing at all.",
+    ].join(" "),
+  })
+  @ApiParam({ name: "purchaseRequestId", format: "uuid" })
+  @ApiOkResponse({ type: PurchaseRequestResponse })
+  @ApiBadRequestResponse({
+    description: "Malformed payload, an unknown decision, or a disallowed field.",
+  })
+  @ApiForbiddenResponse({
+    description:
+      "The principal does not hold MANAGER, or is the requester of this request (BR-005). Nothing is written.",
+  })
+  @ApiNotFoundResponse({
+    description:
+      "Unknown, another tenant's, or another department's identifier — indistinguishable by design.",
+  })
+  @ApiConflictResponse({
+    description:
+      "No Manager step is awaiting a decision, or a concurrent decision already made one.",
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      "A rejection without a reason of at least 10 non-whitespace characters, or a blank approval reason.",
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      "SEC-006. The caller's address or account budget for this route is spent. No decision, transition, flow change or audit event is written.",
+  })
+  async decideApproval(
+    @Param("purchaseRequestId", new ParseUUIDPipe({ version: "4" }))
+    purchaseRequestId: string,
+    @Body() body: ApprovalDecisionDto,
+  ): Promise<PurchaseRequestResponse> {
+    return this.run(async () =>
+      toPurchaseRequestResponse(
+        await this.decidePurchaseRequestApproval.execute(
+          this.tenantContext.getPrincipal(),
+          purchaseRequestId,
+          body,
         ),
       ),
     );
@@ -312,18 +444,31 @@ export class PurchaseRequestsController {
         throw new NotFoundException();
       }
 
-      if (error instanceof PurchaseRequestActionNotAuthorizedError) {
+      if (
+        error instanceof PurchaseRequestActionNotAuthorizedError ||
+        error instanceof ApprovalActionNotAuthorizedError
+      ) {
         // AUTHZ-003. Distinct from 404 on purpose: this names no resource, so it confirms
         // nothing about what exists. The message says the capability is missing, never which
         // role would grant it.
         throw new ForbiddenException("Not allowed to perform this action");
       }
 
+      if (error instanceof SelfApprovalNotAllowedError) {
+        // BR-005. Deliberately not a 404: the caller raised this request, so the refusal
+        // discloses nothing they did not already know, and hiding the rule would leave them
+        // unable to understand why their decision was refused.
+        throw new ForbiddenException(error.message);
+      }
+
       if (error instanceof InvalidPaginationCursorError) {
         throw new BadRequestException(error.message);
       }
 
-      if (error instanceof PurchaseRequestValidationError) {
+      if (
+        error instanceof PurchaseRequestValidationError ||
+        error instanceof ApprovalDecisionValidationError
+      ) {
         // Well-formed JSON that a domain rule refuses, as opposed to a malformed payload the
         // ValidationPipe already answered with 400.
         throw new UnprocessableEntityException(error.message);
@@ -331,7 +476,8 @@ export class PurchaseRequestsController {
 
       if (
         error instanceof PurchaseRequestTransitionNotAllowedError ||
-        error instanceof PurchaseRequestConcurrentlyModifiedError
+        error instanceof PurchaseRequestConcurrentlyModifiedError ||
+        error instanceof ApprovalStepNotActionableError
       ) {
         throw new ConflictException(error.message);
       }

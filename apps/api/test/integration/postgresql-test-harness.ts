@@ -47,9 +47,17 @@ export class PostgreSqlIntegrationTestHarness {
 
   async clean(): Promise<void> {
     await this.database.$transaction([
+      // AUD-003 makes audit_events append-only with a trigger that refuses DELETE, so a test
+      // database is reset with TRUNCATE — which is not a row operation and does not fire it.
+      // Nothing references audit_events, so it can go first. The statement is a fixed
+      // template literal with no interpolation; it is not string-built SQL.
+      this.database.$executeRaw`TRUNCATE TABLE "audit_events"`,
       // Children before parents throughout: every foreign key here is RESTRICT except
       // items -> requests, and relying on that one cascade would leave the order of the
       // rest silently wrong the first time it changes.
+      this.database.approvalStep.deleteMany(),
+      // Steps hold RESTRICT foreign keys to flows, requests and users.
+      this.database.approvalFlow.deleteMany(),
       this.database.purchaseRequestItem.deleteMany(),
       // Requests hold RESTRICT foreign keys to users and departments.
       this.database.purchaseRequest.deleteMany(),
