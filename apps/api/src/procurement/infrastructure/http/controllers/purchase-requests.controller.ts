@@ -30,11 +30,18 @@ import {
   ApiOperation,
   ApiParam,
   ApiTags,
+  ApiHeader,
   ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
   ApiUnprocessableEntityResponse,
 } from "@nestjs/swagger";
 import { OPENAPI_BEARER_SCHEME } from "../../../../platform/http/openapi";
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IdempotencyKey,
+} from "../../../../platform/idempotency/infrastructure/http/idempotency-key.decorator";
+import { rethrowIdempotencyFailure } from "../../../../platform/idempotency/infrastructure/http/idempotency-http";
+import { NO_PURCHASE_REQUEST_SUPPLEMENTS } from "../../../application/contracts/purchase-request-supplements";
 import {
   ApprovalActionNotAuthorizedError,
   ApprovalDecisionValidationError,
@@ -57,6 +64,7 @@ import { ApprovalRateLimitGuard } from "../guards/approval-rate-limit.guard";
 import { CancelOwnPurchaseRequest } from "../../../application/use-cases/cancel-own-purchase-request";
 import { DecidePurchaseRequestApproval } from "../../../application/use-cases/decide-purchase-request-approval";
 import { ListDepartmentApprovalQueue } from "../../../application/use-cases/list-department-approval-queue";
+import { ListQuotationQueue } from "../../../application/use-cases/list-quotation-queue";
 import { CreatePurchaseRequestDraft } from "../../../application/use-cases/create-purchase-request-draft";
 import { DeleteOwnPurchaseRequestDraft } from "../../../application/use-cases/delete-own-purchase-request-draft";
 import { GetOwnPurchaseRequest } from "../../../application/use-cases/get-own-purchase-request";
@@ -110,6 +118,7 @@ export class PurchaseRequestsController {
     private readonly cancelOwnPurchaseRequest: CancelOwnPurchaseRequest,
     private readonly deleteOwnPurchaseRequestDraft: DeleteOwnPurchaseRequestDraft,
     private readonly listDepartmentApprovalQueue: ListDepartmentApprovalQueue,
+    private readonly listQuotationQueue: ListQuotationQueue,
     private readonly decidePurchaseRequestApproval: DecidePurchaseRequestApproval,
   ) {}
 
@@ -137,12 +146,14 @@ export class PurchaseRequestsController {
     return this.run(async () =>
       toPurchaseRequestResponse({
         // A DRAFT has no approval flow: FR-024 materializes one at submission, and returning
-        // an empty one here would be a shape that means nothing.
+        // an empty one here would be a shape that means nothing. It has no selected quote and
+        // no purchase order either, for the same reason.
         request: await this.createPurchaseRequestDraft.execute(
           this.tenantContext.getPrincipal(),
           body,
         ),
         approvalFlow: null,
+        supplements: NO_PURCHASE_REQUEST_SUPPLEMENTS,
       }),
     );
   }
@@ -224,6 +235,42 @@ export class PurchaseRequestsController {
     );
   }
 
+  /**
+   * Declared before `:purchaseRequestId` for the same reason as the queue above: a literal
+   * segment must be matched as a route and never as a request identifier.
+   */
+  @Get("awaiting-quotation")
+  @ApiOperation({
+    summary: "The Buyer's quotation queue",
+    description:
+      "FR-040. Requests a Manager has approved into quotation and which are therefore waiting for quotes. Requires the BUYER role; ADMIN is not a bypass (AUTHZ-007). The boundary is the organization, not a Department: a Buyer runs quotation for the whole tenant (AUTHZ-004). Unlike the Manager queue this does not exclude the caller's own requests — BR-005 forbids deciding one's own request, not quoting it, and hiding those rows would conceal work from the person responsible for doing it.",
+  })
+  @ApiOkResponse({ type: PurchaseRequestPageResponse })
+  @ApiBadRequestResponse({
+    description: "Page size out of range, unknown query parameter, or an unusable cursor.",
+  })
+  @ApiForbiddenResponse({
+    description: "Authenticated, but the principal does not hold BUYER. Names no resource.",
+  })
+  async listQuotationQueuePage(
+    @Query() query: ListPurchaseRequestsQueryDto,
+  ): Promise<PurchaseRequestPageResponse> {
+    return this.run(async () =>
+      toPurchaseRequestPageResponse(
+        await this.listQuotationQueue.execute(
+          this.tenantContext.getPrincipal(),
+          {
+            limit: query.limit,
+            after:
+              query.cursor === undefined
+                ? null
+                : decodePurchaseRequestCursor(query.cursor),
+          },
+        ),
+      ),
+    );
+  }
+
   @Get(":purchaseRequestId")
   @ApiOperation({
     summary: "Read one of the caller's own purchase requests",
@@ -280,12 +327,19 @@ export class PurchaseRequestsController {
           body,
         ),
         approvalFlow: null,
+        supplements: NO_PURCHASE_REQUEST_SUPPLEMENTS,
       }),
     );
   }
 
   @Post(":purchaseRequestId/submit")
   @HttpCode(HttpStatus.OK)
+  @ApiHeader({
+    name: IDEMPOTENCY_KEY_HEADER,
+    required: true,
+    description:
+      "REL-004. An opaque token of 8 to 200 printable non-whitespace characters. Retrying with the same key replays the first result without transitioning again, without materializing a second approval flow and without a second audit event or outbox row; reusing it for a different request is a 409. Only a SHA-256 of the key is ever stored.",
+  })
   @ApiOperation({
     summary: "Submit a DRAFT",
     description:
@@ -294,19 +348,24 @@ export class PurchaseRequestsController {
   @ApiParam({ name: "purchaseRequestId", format: "uuid" })
   @ApiOkResponse({ type: PurchaseRequestResponse })
   @ApiNotFoundResponse({ description: "Unknown, foreign, or another requester's identifier." })
+  @ApiBadRequestResponse({
+    description: "A missing or malformed Idempotency-Key header.",
+  })
   @ApiConflictResponse({
     description:
-      "The current state does not permit submission, or a concurrent transition won the race.",
+      "The current state does not permit submission, a concurrent transition won the race, or the idempotency key was reused for a different request.",
   })
   async submit(
     @Param("purchaseRequestId", new ParseUUIDPipe({ version: "4" }))
     purchaseRequestId: string,
+    @IdempotencyKey() idempotencyKey: string | undefined,
   ): Promise<PurchaseRequestResponse> {
     return this.run(async () =>
       toPurchaseRequestResponse(
         await this.submitOwnPurchaseRequest.execute(
           this.tenantContext.getPrincipal(),
           purchaseRequestId,
+          idempotencyKey,
         ),
       ),
     );
@@ -342,6 +401,12 @@ export class PurchaseRequestsController {
   @Post(":purchaseRequestId/approval-decision")
   @HttpCode(HttpStatus.OK)
   @UseGuards(ApprovalRateLimitGuard)
+  @ApiHeader({
+    name: IDEMPOTENCY_KEY_HEADER,
+    required: true,
+    description:
+      "REL-004. An opaque token of 8 to 200 printable non-whitespace characters. Retrying with the same key replays the first result without deciding again and without a second audit event or outbox row; reusing it for a different request is a 409. Only a SHA-256 of the key is ever stored.",
+  })
   @ApiOperation({
     summary: "Decide the pending Manager approval step",
     description: [
@@ -389,13 +454,14 @@ export class PurchaseRequestsController {
     @Param("purchaseRequestId", new ParseUUIDPipe({ version: "4" }))
     purchaseRequestId: string,
     @Body() body: ApprovalDecisionDto,
+    @IdempotencyKey() idempotencyKey: string | undefined,
   ): Promise<PurchaseRequestResponse> {
     return this.run(async () =>
       toPurchaseRequestResponse(
         await this.decidePurchaseRequestApproval.execute(
           this.tenantContext.getPrincipal(),
           purchaseRequestId,
-          body,
+          { ...body, idempotencyKey },
         ),
       ),
     );
@@ -434,6 +500,9 @@ export class PurchaseRequestsController {
     try {
       return await operation();
     } catch (error: unknown) {
+      // REL-004's failures answer identically on every route that requires a key.
+      rethrowIdempotencyFailure(error);
+
       if (
         error instanceof PurchaseRequestNotFoundError ||
         // The principal's own membership is gone — deactivated or removed between

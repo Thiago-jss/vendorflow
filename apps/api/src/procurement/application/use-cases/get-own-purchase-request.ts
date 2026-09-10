@@ -7,6 +7,7 @@ import {
   type PurchaseRequestRepository,
 } from "../contracts/purchase-request.repository";
 import type { PurchaseRequestView } from "../contracts/purchase-request-view";
+import { ReadPurchaseRequestSupplements } from "./read-purchase-request-supplements";
 
 /**
  * FR-026: the requester's own request, its current state, the step it is waiting on and the
@@ -23,6 +24,7 @@ export class GetOwnPurchaseRequest {
     @Inject(PURCHASE_REQUEST_REPOSITORY)
     private readonly purchaseRequests: PurchaseRequestRepository,
     private readonly getApprovalFlowForRequest: GetApprovalFlowForRequest,
+    private readonly readPurchaseRequestSupplements: ReadPurchaseRequestSupplements,
   ) {}
 
   async execute(
@@ -40,12 +42,20 @@ export class GetOwnPurchaseRequest {
       throw new PurchaseRequestNotFoundError();
     }
 
-    return {
-      request,
-      approvalFlow: await this.getApprovalFlowForRequest.execute({
+    const [approvalFlow, supplements] = await Promise.all([
+      this.getApprovalFlowForRequest.execute({
         organizationId: principal.organizationId,
         purchaseRequestId: request.id,
       }),
-    };
+      // FR-026, added additively: the winning quote and the purchase order when they exist.
+      // Both arrive through inverted ports, so this module still knows nothing about
+      // `quotation` or `purchase-order` (ADR-001 rule 2).
+      this.readPurchaseRequestSupplements.execute(
+        principal.organizationId,
+        request,
+      ),
+    ]);
+
+    return { request, approvalFlow, supplements };
   }
 }

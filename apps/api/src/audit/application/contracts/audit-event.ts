@@ -7,17 +7,42 @@ export const auditEventTypes = [
   "PURCHASE_REQUEST_CANCELLED",
   "APPROVAL_STEP_APPROVED",
   "APPROVAL_STEP_REJECTED",
+  "SUPPLIER_CREATED",
+  "SUPPLIER_DEACTIVATED",
+  "SUPPLIER_QUOTE_REGISTERED",
+  "SUPPLIER_QUOTE_WITHDRAWN",
+  "SUPPLIER_QUOTE_SELECTED",
+  /**
+   * BR-003, emitted only when the re-evaluation actually changed the ladder. "The rule was
+   * consulted" is not an audited action; "two steps were voided and Finance was appended" is.
+   */
+  "APPROVAL_FLOW_REEVALUATED",
+  "PURCHASE_ORDER_ISSUED",
+  "PURCHASE_ORDER_CANCELLED",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
 
 /**
- * The aggregate an event is filed under. All four events of this phase are facts about one
- * PurchaseRequest — the decision events name the request and carry the step's identity in
- * their payload — which is what makes the decisions on a request reconstructable in one
- * ordered read (AUD-005).
+ * The aggregate an event is filed under, and the filing is a decision rather than a
+ * classification.
+ *
+ * Quote registration, withdrawal, selection and the approval re-evaluation are all filed under
+ * the **PurchaseRequest**, even though the first three are facts about a quote. That is what
+ * makes AUD-005 true: the decisions that led to one purchase are reconstructable in a single
+ * ordered read of one aggregate, rather than scattered across a request, three quotes and a
+ * flow that a reader would have to join by hand.
+ *
+ * A Supplier's own lifecycle is filed under the Supplier, because it is not a fact about any
+ * one request. A Purchase Order is filed under itself, because it outlives the request's
+ * workflow: FR-054 lets it be cancelled long after the request reached ORDERED, and an order's
+ * own history is what an operator will be asked about.
  */
-export const auditAggregateTypes = ["PURCHASE_REQUEST"] as const;
+export const auditAggregateTypes = [
+  "PURCHASE_REQUEST",
+  "SUPPLIER",
+  "PURCHASE_ORDER",
+] as const;
 
 export type AuditAggregateType = (typeof auditAggregateTypes)[number];
 

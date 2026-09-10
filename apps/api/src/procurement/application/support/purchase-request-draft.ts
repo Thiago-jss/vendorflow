@@ -1,5 +1,9 @@
-import { PurchaseRequestValidationError } from "../contracts/purchase-request.errors";
-import { parseCalendarDate } from "./calendar-date";
+import { parseCalendarDate } from "../../../platform/calendar/calendar-date";
+import {
+  MAXIMUM_STORABLE_CENTS,
+  isStorableCents,
+  parseCents,
+} from "../../../platform/numeric/centavos";
 import {
   MAXIMUM_SCALED_QUANTITY,
   QUANTITY_DECIMAL_SCALE,
@@ -7,13 +11,9 @@ import {
   parseQuantity,
   type QuantityParseFailure,
   type ScaledQuantity,
-} from "./decimal-quantity";
-import {
-  calculateEstimatedTotalCents,
-  isStorableCents,
-  parseCents,
-  MAXIMUM_STORABLE_CENTS,
-} from "./purchase-request-money";
+} from "../../../platform/numeric/scaled-quantity";
+import { PurchaseRequestValidationError } from "../contracts/purchase-request.errors";
+import { calculateEstimatedTotalCents } from "./purchase-request-money";
 
 /**
  * These are the widths of the `VARCHAR` columns the migration declares, restated so the
@@ -30,9 +30,9 @@ const UNIT_OF_MEASURE_COLUMN_WIDTH = 20;
 export interface PurchaseRequestDraftItemInput {
   readonly description: string;
   readonly unitOfMeasure: string;
-  /** Exact decimal, as a string. Never a JSON number: see `decimal-quantity.ts`. */
+  /** Exact decimal, as a string. Never a JSON number: see `platform/numeric/scaled-quantity.ts`. */
   readonly quantity: string;
-  /** Integer centavos, as a string. Never a JSON number: see `purchase-request-money.ts`. */
+  /** Integer centavos, as a string. Never a JSON number: see `platform/numeric/centavos.ts`. */
   readonly estimatedUnitPriceCents: string;
 }
 

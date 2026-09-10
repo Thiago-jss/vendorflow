@@ -2,6 +2,7 @@ import type {
   ApprovalFlowRecord,
   ApprovalStepRecord,
 } from "../../../approval/application/contracts/approval-flow.repository";
+import type { PurchaseRequestSupplements } from "./purchase-request-supplements";
 import type {
   PurchaseRequestListCursor,
   PurchaseRequestRecord,
@@ -18,6 +19,13 @@ import type {
 export interface PurchaseRequestView {
   readonly request: PurchaseRequestRecord;
   readonly approvalFlow: ApprovalFlowRecord | null;
+  /**
+   * FR-026, added additively. The winning quote and the purchase order, when they exist. Both
+   * come from other modules through the inverted ports in `purchase-request-supplements.ts`,
+   * so this view can carry them without `procurement` importing `quotation` or
+   * `purchase-order` (ADR-001 rule 2).
+   */
+  readonly supplements: PurchaseRequestSupplements;
 }
 
 /** FR-030. One row of a decision maker's queue: what to decide, and which step. */

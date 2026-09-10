@@ -1,10 +1,3 @@
-import { Prisma } from "@vendorflow/database";
-import {
-  QUANTITY_DECIMAL_SCALE,
-  formatQuantity,
-  parseQuantity,
-  type ScaledQuantity,
-} from "../../application/support/decimal-quantity";
 import {
   purchaseRequestStatuses,
   type PurchaseRequestStatus,
@@ -25,29 +18,4 @@ export function toPurchaseRequestStatus(status: string): PurchaseRequestStatus {
   }
 
   return purchaseRequestStatus;
-}
-
-/**
- * `quantity` is `NUMERIC(20, 3)`, which Prisma surfaces as a `Decimal`. The conversion to
- * the application's scaled `bigint` goes through the decimal's fixed-point *string*, never
- * through `toNumber()` and never through decimal multiplication: `toFixed` renders the exact
- * stored value, and the parser turns its digits into thousandths without arithmetic. A
- * binary float never holds the value at any point.
- */
-export function toScaledQuantity(quantity: Prisma.Decimal): ScaledQuantity {
-  const parsed = parseQuantity(quantity.toFixed(QUANTITY_DECIMAL_SCALE));
-
-  if (!parsed.ok) {
-    throw new Error("Persistence returned a quantity the domain cannot represent");
-  }
-
-  return parsed.value;
-}
-
-/**
- * The reverse. A fixed-point string is handed to Prisma rather than a `number`, so the
- * driver binds the exact decimal literal the domain computed.
- */
-export function toDecimalQuantity(scaled: ScaledQuantity): Prisma.Decimal {
-  return new Prisma.Decimal(formatQuantity(scaled));
 }

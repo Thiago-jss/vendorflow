@@ -1,14 +1,23 @@
 import { Injectable } from "@nestjs/common";
 import { DatabaseService, Prisma } from "@vendorflow/database";
 import { transactionClient } from "../../../platform/persistence/prisma-transaction-runner";
+import {
+  toDecimalQuantity,
+  toScaledQuantity,
+} from "../../../platform/persistence/scaled-quantity.mapper";
 import type { TransactionScope } from "../../../platform/persistence/transaction-scope";
 import type {
   ApplyApprovalDecisionInput,
+  ApplyOrderIssuedInput,
+  ApplyQuoteSelectionInput,
   CancelPurchaseRequestInput,
   CreatePurchaseRequestDraftInput,
   DepartmentPurchaseRequestCriteria,
   ListDepartmentPurchaseRequestsCriteria,
+  ListOrganizationPurchaseRequestsCriteria,
   ListOwnPurchaseRequestsCriteria,
+  LockPurchaseRequestInput,
+  OrganizationPurchaseRequestCriteria,
   OwnPurchaseRequestCriteria,
   PurchaseRequestPage,
   PurchaseRequestRecord,
@@ -20,10 +29,10 @@ import type {
 import type { NormalizedPurchaseRequestDraftItem } from "../../application/support/purchase-request-draft";
 import { calculateEstimatedLineTotalCents } from "../../application/support/purchase-request-money";
 import {
-  toDecimalQuantity,
-  toPurchaseRequestStatus,
-  toScaledQuantity,
-} from "./purchase-request-status.mapper";
+  ORDERABLE_STATUSES,
+  QUOTABLE_STATUSES,
+} from "../../application/support/purchase-request-status";
+import { toPurchaseRequestStatus } from "./purchase-request-status.mapper";
 
 const REQUEST_SELECTION = {
   id: true,
@@ -146,6 +155,26 @@ export class PrismaPurchaseRequestRepository
     return request === null ? null : toRecord(request);
   }
 
+  async findOrganizationRequest(
+    criteria: OrganizationPurchaseRequestCriteria,
+  ): Promise<PurchaseRequestRecord | null> {
+    // AUTHZ-004. Buyer and Finance act at organization scope, so the tenant is the whole
+    // predicate — and it is still a predicate, not a filter applied after the fact: another
+    // organization's request is never loaded and answers exactly as an unknown identifier
+    // does (MT-004).
+    const request = await this.database.purchaseRequest.findUnique({
+      where: {
+        organizationId_id: {
+          organizationId: criteria.organizationId,
+          id: criteria.purchaseRequestId,
+        },
+      },
+      select: REQUEST_SELECTION,
+    });
+
+    return request === null ? null : toRecord(request);
+  }
+
   async listOwnRequests(
     criteria: ListOwnPurchaseRequestsCriteria,
   ): Promise<PurchaseRequestPage> {
@@ -190,6 +219,31 @@ export class PrismaPurchaseRequestRepository
         ...(criteria.excludingRequesterId === null
           ? {}
           : { requesterId: { not: criteria.excludingRequesterId } }),
+        ...(after === null
+          ? {}
+          : {
+              OR: [
+                { createdAt: { lt: after.createdAt } },
+                { createdAt: after.createdAt, id: { lt: after.id } },
+              ],
+            }),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: criteria.limit + 1,
+      select: SUMMARY_SELECTION,
+    });
+
+    return toPage(rows, criteria.limit);
+  }
+
+  async listOrganizationRequests(
+    criteria: ListOrganizationPurchaseRequestsCriteria,
+  ): Promise<PurchaseRequestPage> {
+    const after = criteria.after;
+    const rows = await this.database.purchaseRequest.findMany({
+      where: {
+        organizationId: criteria.organizationId,
+        status: { in: criteria.statuses.map(toPurchaseRequestStatus) },
         ...(after === null
           ? {}
           : {
@@ -304,15 +358,96 @@ export class PrismaPurchaseRequestRepository
   ): Promise<PurchaseRequestRecord | null> {
     return this.transition(scope, {
       // The department is restated inside the write, not only in the read that preceded it:
-      // the responsibility boundary is part of the predicate that decides the row (AUTHZ-004).
+      // a Manager's responsibility boundary is part of the predicate that decides the row
+      // (AUTHZ-004). A Purchasing or Finance decision leaves it undefined, which is what
+      // organization scope means here — not a wider predicate, a different one.
       identity: {
         id: input.purchaseRequestId,
         organizationId: input.organizationId,
         departmentId: input.departmentId,
       },
       fromStatuses: input.fromStatuses,
+      // `null` means the request keeps its state because a further rung still stands
+      // (FR-035). The UPDATE still runs, so the permitted source states are proven under the
+      // row's lock exactly as they are for a real transition; only `updated_at` moves, which
+      // is true — the request's approval ladder did change.
+      data:
+        input.toStatus === null
+          ? { updatedAt: new Date() }
+          : { status: toPurchaseRequestStatus(input.toStatus) },
+    });
+  }
+
+  async applyQuoteSelection(
+    scope: TransactionScope,
+    input: ApplyQuoteSelectionInput,
+  ): Promise<PurchaseRequestRecord | null> {
+    return this.transition(scope, {
+      identity: {
+        id: input.purchaseRequestId,
+        organizationId: input.organizationId,
+      },
+      fromStatuses: QUOTABLE_STATUSES,
       data: { status: toPurchaseRequestStatus(input.toStatus) },
     });
+  }
+
+  async applyOrderIssued(
+    scope: TransactionScope,
+    input: ApplyOrderIssuedInput,
+  ): Promise<PurchaseRequestRecord | null> {
+    return this.transition(scope, {
+      identity: {
+        id: input.purchaseRequestId,
+        organizationId: input.organizationId,
+      },
+      fromStatuses: ORDERABLE_STATUSES,
+      data: { status: "ORDERED" },
+    });
+  }
+
+  /**
+   * The first statement of every quotation and ordering transaction.
+   *
+   * `SELECT ... FOR UPDATE` is used rather than a conditional UPDATE because the caller needs
+   * the request's *content* — its items, its estimated total — before deciding what to write,
+   * and needs that content not to change underneath while it decides. A conditional UPDATE
+   * would prove the state and lock the row too, but only by writing to it, which is the wrong
+   * shape for an operation that may legitimately end in a domain refusal.
+   *
+   * The statement is a parameterized tagged template with an explicit `organization_id`
+   * predicate. There is no string-built SQL here (SEC-005, ADR-002).
+   */
+  async lockRequestInStatuses(
+    scope: TransactionScope,
+    input: LockPurchaseRequestInput,
+  ): Promise<PurchaseRequestRecord | null> {
+    const transaction = transactionClient(scope);
+    const statuses = input.requiredStatuses.map(toPurchaseRequestStatus);
+    const locked = await transaction.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+        FROM "purchase_requests"
+       WHERE "organization_id" = ${input.organizationId}::uuid
+         AND "id" = ${input.purchaseRequestId}::uuid
+         AND "status"::text = ANY(${statuses}::text[])
+         FOR UPDATE
+    `;
+
+    if (locked.length !== 1) {
+      return null;
+    }
+
+    const request = await transaction.purchaseRequest.findUnique({
+      where: {
+        organizationId_id: {
+          organizationId: input.organizationId,
+          id: input.purchaseRequestId,
+        },
+      },
+      select: REQUEST_SELECTION,
+    });
+
+    return request === null ? null : toRecord(request);
   }
 
   async deleteOwnDraft(criteria: OwnPurchaseRequestCriteria): Promise<boolean> {

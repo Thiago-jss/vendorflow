@@ -25,7 +25,7 @@ import { RevokeAuthSession } from "../../../application/use-cases/revoke-auth-se
 import { AuthOriginGuard } from "../guards/auth-origin.guard";
 import { AuthThrottlerGuard } from "../guards/auth-throttler.guard";
 import { LoginRequestDto } from "../dto/login.dto";
-import { TooManyRequestsException } from "../exceptions/too-many-requests.exception";
+import { TooManyRequestsException } from "../../../../platform/http/too-many-requests.exception";
 import {
   clearRefreshCookie,
   readRefreshCookie,

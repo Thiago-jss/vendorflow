@@ -40,15 +40,27 @@ export interface TopologyNames {
   readonly workQueue: string;
   readonly retryQueues: readonly string[];
   readonly deadLetterQueue: string;
-  readonly bindingPattern: string;
+  readonly bindingPatterns: readonly string[];
 }
 
 /**
- * Every event this phase emits is a fact about a purchase request, so one queue serves both
- * types. The pattern is a topic binding rather than a direct key so a later consumer can bind
- * to a single event type without the relay changing anything.
+ * One queue serves every event this system emits, and it is bound by **family** rather than by
+ * event type, so a new event inside a family needs no topology change at all.
+ *
+ * There are two families because there are two aggregates. A purchase order is not a purchase
+ * request transition: FR-054 lets an order be cancelled long after its request reached ORDERED,
+ * and a consumer that cares about orders should be able to bind to `purchase_order.#` without
+ * also receiving every approval decision in the tenant. Keeping them separate costs one extra
+ * binding per queue now and avoids a routing-key migration later.
+ *
+ * A readonly list rather than a single string: every queue in the ladder — work, each retry
+ * tier and the dead letter — iterates it, so adding a family is one entry here rather than
+ * three edits in `assertTopology`.
  */
-const BINDING_PATTERN = "purchase_request.#";
+const BINDING_PATTERNS: readonly string[] = [
+  "purchase_request.#",
+  "purchase_order.#",
+];
 
 export function topologyNames(
   prefix: string,
@@ -67,7 +79,7 @@ export function topologyNames(
       (tier) => `${prefix}.purchase-request-events.retry.${tier}`,
     ),
     deadLetterQueue: `${prefix}.purchase-request-events.dlq`,
-    bindingPattern: BINDING_PATTERN,
+    bindingPatterns: BINDING_PATTERNS,
   };
 }
 
@@ -98,11 +110,9 @@ export async function assertTopology(
       "x-dead-letter-exchange": names.deadLetterExchange,
     },
   });
-  await channel.bindQueue(
-    names.workQueue,
-    names.eventsExchange,
-    names.bindingPattern,
-  );
+  for (const pattern of names.bindingPatterns) {
+    await channel.bindQueue(names.workQueue, names.eventsExchange, pattern);
+  }
 
   for (const [index, retryQueue] of names.retryQueues.entries()) {
     const retryExchange = names.retryExchanges[index];
@@ -124,14 +134,21 @@ export async function assertTopology(
         "x-dead-letter-exchange": names.eventsExchange,
       },
     });
-    await channel.bindQueue(retryQueue, retryExchange, names.bindingPattern);
+    // The same patterns as the work queue. A retry tier that bound fewer families would
+    // silently drop the ones it missed the first time a message of that family failed.
+    for (const pattern of names.bindingPatterns) {
+      await channel.bindQueue(retryQueue, retryExchange, pattern);
+    }
   }
 
   // Terminal. No TTL and no dead-letter route: a message here waits for a person.
   await channel.assertQueue(names.deadLetterQueue, { durable: true });
-  await channel.bindQueue(
-    names.deadLetterQueue,
-    names.deadLetterExchange,
-    names.bindingPattern,
-  );
+
+  for (const pattern of names.bindingPatterns) {
+    await channel.bindQueue(
+      names.deadLetterQueue,
+      names.deadLetterExchange,
+      pattern,
+    );
+  }
 }

@@ -12,8 +12,8 @@ import type {
   PurchaseRequestApprovalQueueItem,
   PurchaseRequestApprovalQueuePage,
 } from "../contracts/purchase-request-view";
-import { DECIDABLE_APPROVAL_STEP_ROLE } from "../support/purchase-request-approval";
-import { APPROVAL_DECIDABLE_STATUSES } from "../support/purchase-request-status";
+import { MANAGER_APPROVAL_STEP_ROLE } from "../support/purchase-request-approval";
+import { MANAGER_DECIDABLE_STATUSES } from "../support/purchase-request-status";
 import {
   DEFAULT_PURCHASE_REQUEST_PAGE_SIZE,
   MAXIMUM_PURCHASE_REQUEST_PAGE_SIZE,
@@ -53,14 +53,14 @@ export class ListDepartmentApprovalQueue {
     principal: TrustedPrincipal,
     input: ListDepartmentApprovalQueueInput = {},
   ): Promise<PurchaseRequestApprovalQueuePage> {
-    assertMayDecideApprovalStep(principal, DECIDABLE_APPROVAL_STEP_ROLE);
+    assertMayDecideApprovalStep(principal, MANAGER_APPROVAL_STEP_ROLE);
 
     const context = await this.getCurrentOrganizationContext.execute(principal);
     const requested = input.limit ?? DEFAULT_PURCHASE_REQUEST_PAGE_SIZE;
     const page = await this.purchaseRequests.listDepartmentRequests({
       organizationId: principal.organizationId,
       departmentId: context.membership.department.id,
-      statuses: APPROVAL_DECIDABLE_STATUSES,
+      statuses: MANAGER_DECIDABLE_STATUSES,
       excludingRequesterId: principal.userId,
       limit: Math.min(
         Math.max(requested, 1),
@@ -71,7 +71,7 @@ export class ListDepartmentApprovalQueue {
     const pendingSteps = await this.listActionableApprovalSteps.execute({
       organizationId: principal.organizationId,
       purchaseRequestIds: page.items.map((summary) => summary.id),
-      role: DECIDABLE_APPROVAL_STEP_ROLE,
+      role: MANAGER_APPROVAL_STEP_ROLE,
     });
 
     const items = page.items.reduce<PurchaseRequestApprovalQueueItem[]>(

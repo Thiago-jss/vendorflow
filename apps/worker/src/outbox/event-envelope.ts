@@ -11,6 +11,8 @@ import { z } from "zod";
 export const supportedEventTypes = [
   "PURCHASE_REQUEST_SUBMITTED",
   "PURCHASE_REQUEST_APPROVAL_DECIDED",
+  "PURCHASE_REQUEST_QUOTE_SELECTED",
+  "PURCHASE_ORDER_ISSUED",
 ] as const;
 
 export type SupportedEventType = (typeof supportedEventTypes)[number];
@@ -20,11 +22,18 @@ export const SUPPORTED_SCHEMA_VERSION = 1;
 /**
  * The routing key of each event type, written out rather than derived from the enum name. A
  * derivation would silently rename every queue binding the day an enum value is renamed; a
- * table makes that a compile error.
+ * table makes that a compile error — and `Record<SupportedEventType, string>` makes adding an
+ * event type without a routing key one too.
  */
 const ROUTING_KEYS: Readonly<Record<SupportedEventType, string>> = {
   PURCHASE_REQUEST_SUBMITTED: "purchase_request.submitted",
   PURCHASE_REQUEST_APPROVAL_DECIDED: "purchase_request.approval_decided",
+  PURCHASE_REQUEST_QUOTE_SELECTED: "purchase_request.quote_selected",
+  // A second namespace, not a third purchase_request key. A purchase order is its own
+  // aggregate with its own lifecycle: FR-054 lets it be cancelled long after the request that
+  // produced it reached ORDERED, so a consumer that cares about orders should be able to bind
+  // to them without also receiving every request transition.
+  PURCHASE_ORDER_ISSUED: "purchase_order.issued",
 };
 
 export function isSupportedEventType(

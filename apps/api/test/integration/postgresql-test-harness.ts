@@ -60,6 +60,18 @@ export class PostgreSqlIntegrationTestHarness {
       // mutable rows, so an ordinary delete is enough.
       this.database.outboxConsumerReceipt.deleteMany(),
       this.database.outboxMessage.deleteMany(),
+      // REL-004 records reference users and nothing references them.
+      this.database.idempotencyRecord.deleteMany(),
+      // A purchase order is a snapshot: its lines are RESTRICT, so they go first, and the
+      // order itself has to precede the quote, request and supplier it points at.
+      this.database.purchaseOrderItem.deleteMany(),
+      this.database.purchaseOrder.deleteMany(),
+      this.database.purchaseOrderNumberSequence.deleteMany(),
+      // Quote lines cascade from their quote, but they also hold a RESTRICT reference to a
+      // purchase request item, so they are removed explicitly and first.
+      this.database.supplierQuoteItem.deleteMany(),
+      this.database.supplierQuote.deleteMany(),
+      this.database.supplier.deleteMany(),
       this.database.approvalStep.deleteMany(),
       // Steps hold RESTRICT foreign keys to flows, requests and users.
       this.database.approvalFlow.deleteMany(),

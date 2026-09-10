@@ -1,70 +1,37 @@
-import { quantityScaleFactor, type ScaledQuantity } from "./decimal-quantity";
+import { calculateLineTotalCents } from "../../../platform/numeric/line-total";
+import type { ScaledQuantity } from "../../../platform/numeric/scaled-quantity";
 
 /**
- * BR-030/BR-031. Money is BRL-only and is an integer number of centavos in the database, in
- * the domain and on the wire. There is no currency column and no currency field.
+ * FR-020 and BR-032/BR-033, and nothing else.
  *
- * The domain type is `bigint`, and the wire type is a digit string. Both are exact at any
- * magnitude, which is what lets this module carry no business ceiling on a unit price or a
- * total: after the arbitrary caps of the first implementation were removed, a total can
- * legitimately exceed `Number.MAX_SAFE_INTEGER`, and narrowing it to a JSON number would
- * silently corrupt it. A string does not.
+ * The exact primitives this builds on — the centavo representation of money, the thousandths
+ * representation of a quantity and the single half-up step that turns the two into a line
+ * total — belong to `platform/numeric`, because procurement, quotation and purchase-order all
+ * speak them and a second definition of any of them is a second answer to "what is this
+ * total".
  *
- * The one remaining ceiling is `MAXIMUM_STORABLE_CENTS`. It is the range of PostgreSQL's
- * `BIGINT`, which is what the monetary columns are — a storage width, explicitly technical,
- * not a policy about how much an organization may request. Exceeding it is reported as such
- * rather than wrapping or truncating.
+ * What stays here is the part that is only true of a *purchase request*: an estimate is the
+ * requester's own figure rather than a supplier's price, and a request total is the sum of
+ * its estimated lines.
+ *
+ * There is no `Number`, no `parseFloat`, no `toFixed` and no inexact division anywhere in
+ * this chain.
  */
-export const MAXIMUM_STORABLE_CENTS = 9_223_372_036_854_775_807n;
-
-/** Canonical non-negative integer, no sign, no separators, no leading zeros. */
-export const CENTS_WIRE_PATTERN = /^(0|[1-9]\d*)$/;
-
-export type CentsParseResult =
-  | { readonly ok: true; readonly value: bigint }
-  | { readonly ok: false; readonly reason: "malformed" | "not-storable" };
-
-export function parseCents(value: string): CentsParseResult {
-  if (!CENTS_WIRE_PATTERN.test(value)) {
-    return { ok: false, reason: "malformed" };
-  }
-
-  const parsed = BigInt(value);
-
-  if (parsed > MAXIMUM_STORABLE_CENTS) {
-    return { ok: false, reason: "not-storable" };
-  }
-
-  return { ok: true, value: parsed };
-}
-
-export function formatCents(value: bigint): string {
-  return value.toString();
-}
-
 export interface EstimatedLine {
-  /** Thousandths of a unit; see `decimal-quantity.ts`. */
+  /** Thousandths of a unit; see `platform/numeric/scaled-quantity.ts`. */
   readonly quantityScaled: ScaledQuantity;
   readonly estimatedUnitPriceCents: bigint;
 }
 
 /**
- * BR-033: rounding is half-up, at the centavo, applied **once** at the line total and never
- * at the unit price.
- *
- * The multiplication happens in exact integer arithmetic before any division, so the only
- * rounding in the whole calculation is the single half-up step below. `remainder * 2 >=
- * divisor` is the half-up test written without a division that would reintroduce rounding;
- * quantity is positive and price is non-negative, so there is no away-from-zero case to
- * distinguish.
+ * BR-033 at a request line. The rounding itself is the platform primitive; the only thing
+ * added here is that the price being multiplied is an *estimate*.
  */
 export function calculateEstimatedLineTotalCents(line: EstimatedLine): bigint {
-  const divisor = quantityScaleFactor();
-  const scaledTotal = line.quantityScaled * line.estimatedUnitPriceCents;
-  const quotient = scaledTotal / divisor;
-  const remainder = scaledTotal % divisor;
-
-  return remainder * 2n >= divisor ? quotient + 1n : quotient;
+  return calculateLineTotalCents({
+    quantityScaled: line.quantityScaled,
+    unitPriceCents: line.estimatedUnitPriceCents,
+  });
 }
 
 /**
@@ -82,8 +49,4 @@ export function calculateEstimatedTotalCents(
     (total, line) => total + calculateEstimatedLineTotalCents(line),
     0n,
   );
-}
-
-export function isStorableCents(value: bigint): boolean {
-  return value >= 0n && value <= MAXIMUM_STORABLE_CENTS;
 }

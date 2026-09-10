@@ -64,6 +64,13 @@ model Organization {
   auditEvents AuditEvent[]
   outboxMessages OutboxMessage[]
   outboxConsumerReceipts OutboxConsumerReceipt[]
+  suppliers Supplier[]
+  supplierQuotes SupplierQuote[]
+  supplierQuoteItems SupplierQuoteItem[]
+  purchaseOrders PurchaseOrder[]
+  purchaseOrderItems PurchaseOrderItem[]
+  purchaseOrderNumberSequence PurchaseOrderNumberSequence?
+  idempotencyRecords IdempotencyRecord[]
 
   @@map("organizations")
 }
@@ -127,6 +134,11 @@ model User {
   purchaseRequests PurchaseRequest[]
   decidedApprovalSteps ApprovalStep[]
   auditEvents AuditEvent[]
+  registeredSupplierQuotes SupplierQuote[] @relation("SupplierQuoteRegisteredBy")
+  selectedSupplierQuotes SupplierQuote[] @relation("SupplierQuoteSelectedBy")
+  issuedPurchaseOrders PurchaseOrder[] @relation("PurchaseOrderIssuedBy")
+  cancelledPurchaseOrders PurchaseOrder[] @relation("PurchaseOrderCancelledBy")
+  idempotencyRecords IdempotencyRecord[]
 
   @@unique([organizationId, id], map: "users_organization_id_id_key")
   @@map("users")
@@ -203,6 +215,9 @@ model PurchaseRequest {
   items        PurchaseRequestItem[]
   approvalFlow ApprovalFlow?
   approvalSteps ApprovalStep[]
+  supplierQuotes SupplierQuote[]
+  supplierQuoteItems SupplierQuoteItem[]
+  purchaseOrder PurchaseOrder?
 
   @@unique([organizationId, id], map: "purchase_requests_organization_id_id_key")
   @@index([organizationId, requesterId, createdAt(sort: Desc), id(sort: Desc)], map: "purchase_requests_organization_id_requester_id_created_at_idx")
@@ -235,9 +250,14 @@ model PurchaseRequestItem {
 
   organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Cascade, onUpdate: Restrict)
+  supplierQuoteItems SupplierQuoteItem[]
 
   @@unique([organizationId, id], map: "purchase_request_items_organization_id_id_key")
   @@unique([organizationId, purchaseRequestId, position], map: "purchase_request_items_organization_id_request_id_position_key")
+  /// Candidate key for BR-021's strongest guarantee: a SupplierQuoteItem carries the request
+  /// its quote belongs to and points at a line through *this* key, so PostgreSQL refuses a
+  /// quote line that prices an item of a different request — even one in the same tenant.
+  @@unique([organizationId, purchaseRequestId, id], map: "purchase_request_items_organization_id_request_id_id_key")
   @@map("purchase_request_items")
 }
 
@@ -287,6 +307,16 @@ enum AuditEventType {
   PURCHASE_REQUEST_CANCELLED
   APPROVAL_STEP_APPROVED
   APPROVAL_STEP_REJECTED
+  SUPPLIER_CREATED
+  SUPPLIER_DEACTIVATED
+  SUPPLIER_QUOTE_REGISTERED
+  SUPPLIER_QUOTE_WITHDRAWN
+  SUPPLIER_QUOTE_SELECTED
+  /// BR-003. Emitted only when the re-evaluation actually changed the ladder, so the trail
+  /// records a decision rather than the fact that a rule was consulted.
+  APPROVAL_FLOW_REEVALUATED
+  PURCHASE_ORDER_ISSUED
+  PURCHASE_ORDER_CANCELLED
 
   @@map("audit_event_type")
 }
@@ -297,6 +327,11 @@ enum AuditEventType {
 /// in one ordered read (AUD-005).
 enum AuditAggregateType {
   PURCHASE_REQUEST
+  /// A Supplier's own lifecycle is not a fact about any one request, so it is filed under the
+  /// Supplier. Quote facts stay filed under the PurchaseRequest they belong to, which is what
+  /// keeps the decisions on one request reconstructable in a single ordered read (AUD-005).
+  SUPPLIER
+  PURCHASE_ORDER
 
   @@map("audit_aggregate_type")
 }
@@ -379,6 +414,8 @@ enum OutboxMessageStatus {
 enum OutboxEventType {
   PURCHASE_REQUEST_SUBMITTED
   PURCHASE_REQUEST_APPROVAL_DECIDED
+  PURCHASE_REQUEST_QUOTE_SELECTED
+  PURCHASE_ORDER_ISSUED
 
   @@map("outbox_event_type")
 }
@@ -388,6 +425,7 @@ enum OutboxEventType {
 /// sharing one enum would couple what may be audited to what may be published.
 enum OutboxAggregateType {
   PURCHASE_REQUEST
+  PURCHASE_ORDER
 
   @@map("outbox_aggregate_type")
 }
@@ -500,4 +538,298 @@ model AuditEvent {
 
   @@unique([organizationId, aggregateType, aggregateId, sequence], map: "audit_events_organization_id_aggregate_sequence_key")
   @@map("audit_events")
+}
+
+/// FR-010/FR-013. How a Supplier's fiscal identity is to be read.
+///
+/// The type is modelled explicitly rather than inferred from the shape of the string,
+/// because "14 digits" is not a claim about a country and inference is not a decision. CNPJ
+/// means the value was normalized to its 14 digits and its check digits were verified.
+/// `OTHER` means the organization supplied an identifier this system stores faithfully and
+/// deliberately does not claim to have validated against any national registry.
+enum SupplierTaxIdentifierType {
+  CNPJ
+  OTHER
+
+  @@map("supplier_tax_identifier_type")
+}
+
+/// BR-022/BR-024. `ACTIVE` is a live offer; `WITHDRAWN` is one the Buyer took back and which
+/// stays visible in history (FR-046); `SELECTED` is the single winning quote of a request.
+/// Both terminal states are recorded, never deleted.
+enum SupplierQuoteStatus {
+  ACTIVE
+  WITHDRAWN
+  SELECTED
+
+  @@map("supplier_quote_status")
+}
+
+/// FR-054. Cancellation is terminal and does not reopen the request it came from (BR-013).
+enum PurchaseOrderStatus {
+  ISSUED
+  CANCELLED
+
+  @@map("purchase_order_status")
+}
+
+/// REL-004's four operations, named exactly as the requirement names them. A value exists
+/// when the durable operation exists; there is no generic "any request" idempotency.
+enum IdempotentOperation {
+  PURCHASE_REQUEST_SUBMISSION
+  APPROVAL_DECISION
+  QUOTE_SELECTION
+  PURCHASE_ORDER_ISSUANCE
+
+  @@map("idempotent_operation")
+}
+
+/// FR-010/FR-011. A tenant-owned Supplier. Never shared across organizations (MT-002), and
+/// never deleted: FR-012 deactivates, because historical quotes and purchase orders keep
+/// pointing here.
+model Supplier {
+  id             String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String                    @map("organization_id") @db.Uuid
+  legalName      String                    @map("legal_name") @db.VarChar(200)
+  tradeName      String                    @map("trade_name") @db.VarChar(200)
+  taxIdentifierType SupplierTaxIdentifierType @map("tax_identifier_type")
+  /// As the organization supplied it, trimmed. Kept so a person can recognize what they
+  /// typed; never the value uniqueness is decided on.
+  taxIdentifier  String                    @map("tax_identifier") @db.VarChar(40)
+  /// FR-013/MT-006. The comparison form: 14 digits for a CNPJ, uppercase alphanumerics for
+  /// OTHER. Uniqueness is `(organization_id, tax_identifier_normalized)` regardless of type,
+  /// so two spellings of one identifier cannot both be registered.
+  taxIdentifierNormalized String            @map("tax_identifier_normalized") @db.VarChar(40)
+  contactEmail   String                    @map("contact_email") @db.VarChar(320)
+  contactPhone   String                    @map("contact_phone") @db.VarChar(40)
+  isActive       Boolean                   @default(true) @map("is_active")
+  deactivatedAt  DateTime?                 @map("deactivated_at") @db.Timestamptz(3)
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  quotes       SupplierQuote[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, id], map: "suppliers_organization_id_id_key")
+  @@unique([organizationId, taxIdentifierNormalized], map: "suppliers_organization_id_tax_identifier_normalized_key")
+  @@index([organizationId, createdAt(sort: Desc), id(sort: Desc)], map: "suppliers_organization_id_created_at_idx")
+  @@map("suppliers")
+}
+
+/// FR-040–FR-042. One supplier's priced answer to one request.
+///
+/// Every amount is server-computed (BR-032): `items_total_cents` is the sum of the already
+/// rounded line totals, and `total_cents` is that plus freight minus discount. A CHECK
+/// re-states the identity, so a row whose total disagrees with its parts cannot exist.
+model SupplierQuote {
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String              @map("organization_id") @db.Uuid
+  purchaseRequestId String              @map("purchase_request_id") @db.Uuid
+  supplierId        String              @map("supplier_id") @db.Uuid
+  status            SupplierQuoteStatus @default(ACTIVE)
+  freightCents      BigInt              @map("freight_cents")
+  discountCents     BigInt              @map("discount_cents")
+  itemsTotalCents   BigInt              @map("items_total_cents")
+  totalCents        BigInt              @map("total_cents")
+  /// BR-021. Persisted so the deferred coverage trigger has something to compare against
+  /// without counting twice, and so a quote row alone states how many lines it must have.
+  itemCount         Int                 @map("item_count")
+  /// BR-023. Calendar date, inclusive: a quote is selectable *on* its validity date.
+  validUntil        DateTime            @map("valid_until") @db.Date
+  deliveryLeadTimeDays Int              @map("delivery_lead_time_days")
+  registeredById    String              @map("registered_by_id") @db.Uuid
+  /// FR-044. Mandatory when a quote is selected, at least 10 non-whitespace characters. It
+  /// stays in tenant-scoped storage and never reaches a broker payload.
+  selectionRationale String?            @map("selection_rationale") @db.VarChar(2000)
+  selectedById      String?             @map("selected_by_id") @db.Uuid
+  selectedAt        DateTime?           @map("selected_at") @db.Timestamptz(3)
+  withdrawnAt       DateTime?           @map("withdrawn_at") @db.Timestamptz(3)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  supplier        Supplier        @relation(fields: [organizationId, supplierId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  registeredBy    User            @relation("SupplierQuoteRegisteredBy", fields: [organizationId, registeredById], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  selectedBy      User?           @relation("SupplierQuoteSelectedBy", fields: [organizationId, selectedById], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  items           SupplierQuoteItem[]
+  /// Declared one-to-many only because Prisma requires the *relation's own* field list to be
+  /// unique for a one-to-one, and that list is the four-column tenant/quote/request/supplier
+  /// key. At most one order can exist per quote all the same: the narrower
+  /// `(organization_id, supplier_quote_id)` unique constraint below is what enforces it.
+  purchaseOrders  PurchaseOrder[]
+
+  @@unique([organizationId, id], map: "supplier_quotes_organization_id_id_key")
+  /// Lets a quote line prove, in PostgreSQL, that it belongs to the same request as its quote.
+  @@unique([organizationId, id, purchaseRequestId], map: "supplier_quotes_organization_id_id_request_id_key")
+  /// Lets a PurchaseOrder prove, in PostgreSQL, that the supplier it names is the supplier of
+  /// the quote it was derived from. Application convention alone is not sufficient (FR-051).
+  @@unique([organizationId, id, purchaseRequestId, supplierId], map: "supplier_quotes_organization_id_id_request_id_supplier_id_key")
+  @@index([organizationId, purchaseRequestId, totalCents], map: "supplier_quotes_organization_id_request_id_total_idx")
+  @@map("supplier_quotes")
+}
+
+/// FR-041. One quoted line, in one-to-one correspondence with a PurchaseRequestItem.
+///
+/// `quantity` is copied from the request line at registration and is never client input: a
+/// buyer prices what was asked for, they do not restate it (BR-025). `line_total_cents` is
+/// half-up rounded once at the line (BR-033).
+model SupplierQuoteItem {
+  id                    String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId        String  @map("organization_id") @db.Uuid
+  supplierQuoteId       String  @map("supplier_quote_id") @db.Uuid
+  /// Denormalized from the quote and proven equal to it by a composite foreign key, so the
+  /// request line this prices can be constrained to the same request in the database.
+  purchaseRequestId     String  @map("purchase_request_id") @db.Uuid
+  purchaseRequestItemId String  @map("purchase_request_item_id") @db.Uuid
+  position              Int
+  quantity              Decimal @db.Decimal(20, 3)
+  unitPriceCents        BigInt  @map("unit_price_cents")
+  lineTotalCents        BigInt  @map("line_total_cents")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization        Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  supplierQuote       SupplierQuote       @relation(fields: [organizationId, supplierQuoteId, purchaseRequestId], references: [organizationId, id, purchaseRequestId], onDelete: Cascade, onUpdate: Restrict)
+  purchaseRequest     PurchaseRequest     @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequestItem PurchaseRequestItem @relation(fields: [organizationId, purchaseRequestId, purchaseRequestItemId], references: [organizationId, purchaseRequestId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "supplier_quote_items_organization_id_id_key")
+  /// BR-021's "no duplicate": one quote prices each request line at most once.
+  @@unique([organizationId, supplierQuoteId, purchaseRequestItemId], map: "supplier_quote_items_organization_id_quote_id_request_item_key")
+  @@unique([organizationId, supplierQuoteId, position], map: "supplier_quote_items_organization_id_quote_id_position_key")
+  @@map("supplier_quote_items")
+}
+
+/// FR-050–FR-053. A historical snapshot, deliberately independent of the rows it was copied
+/// from: supplier records, quotes and request lines may change afterwards and a purchase
+/// order must not (FR-051). That is why the line table below holds no foreign key back to a
+/// quote line or a request line.
+model PurchaseOrder {
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String              @map("organization_id") @db.Uuid
+  purchaseRequestId String              @map("purchase_request_id") @db.Uuid
+  supplierQuoteId   String              @map("supplier_quote_id") @db.Uuid
+  supplierId        String              @map("supplier_id") @db.Uuid
+  /// FR-053. `PO-000001`, unique within the organization. Allocated inside the issuance
+  /// transaction from the tenant's own counter, so a rollback consumes no visible number.
+  number            String              @db.VarChar(20)
+  sequenceValue     BigInt              @map("sequence_value")
+  status            PurchaseOrderStatus @default(ISSUED)
+  /// Snapshot fields. Trade name, contact email and contact phone are deliberately absent:
+  /// a purchase order needs the legal identity it was issued against, not the supplier's
+  /// contact book (SEC-009).
+  supplierLegalName String              @map("supplier_legal_name") @db.VarChar(200)
+  supplierTaxIdentifier String          @map("supplier_tax_identifier") @db.VarChar(40)
+  supplierTaxIdentifierType SupplierTaxIdentifierType @map("supplier_tax_identifier_type")
+  freightCents      BigInt              @map("freight_cents")
+  discountCents     BigInt              @map("discount_cents")
+  itemsTotalCents   BigInt              @map("items_total_cents")
+  totalCents        BigInt              @map("total_cents")
+  deliveryLeadTimeDays Int              @map("delivery_lead_time_days")
+  issuedById        String              @map("issued_by_id") @db.Uuid
+  issuedAt          DateTime            @map("issued_at") @db.Timestamptz(3)
+  cancelledById     String?             @map("cancelled_by_id") @db.Uuid
+  cancelledAt       DateTime?           @map("cancelled_at") @db.Timestamptz(3)
+  /// FR-054. Tenant-scoped auditable text; like the selection rationale it never leaves in a
+  /// broker payload.
+  cancellationReason String?            @map("cancellation_reason") @db.VarChar(2000)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseRequest PurchaseRequest @relation(fields: [organizationId, purchaseRequestId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  /// Four columns, not one: the order's supplier must be the supplier of the quote it was
+  /// derived from, and PostgreSQL is what proves it.
+  supplierQuote   SupplierQuote   @relation(fields: [organizationId, supplierQuoteId, purchaseRequestId, supplierId], references: [organizationId, id, purchaseRequestId, supplierId], onDelete: Restrict, onUpdate: Restrict)
+  supplier        Supplier        @relation(fields: [organizationId, supplierId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  issuedBy        User            @relation("PurchaseOrderIssuedBy", fields: [organizationId, issuedById], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  cancelledBy     User?           @relation("PurchaseOrderCancelledBy", fields: [organizationId, cancelledById], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  items           PurchaseOrderItem[]
+
+  @@unique([organizationId, id], map: "purchase_orders_organization_id_id_key")
+  @@unique([organizationId, number], map: "purchase_orders_organization_id_number_key")
+  /// FR-050: exactly one purchase order per approved request, and one per selected quote.
+  @@unique([organizationId, purchaseRequestId], map: "purchase_orders_organization_id_purchase_request_id_key")
+  @@unique([organizationId, supplierQuoteId], map: "purchase_orders_organization_id_supplier_quote_id_key")
+  @@index([organizationId, issuedAt(sort: Desc), id(sort: Desc)], map: "purchase_orders_organization_id_issued_at_idx")
+  @@map("purchase_orders")
+}
+
+/// FR-051. A copied line. Description, unit of measure, quantity and position come from the
+/// request line; unit price and line total come from the selected quote line. There is no
+/// foreign key to either, on purpose: a snapshot that a later edit can drag along is not a
+/// snapshot.
+model PurchaseOrderItem {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  purchaseOrderId String   @map("purchase_order_id") @db.Uuid
+  position        Int
+  description     String   @db.VarChar(500)
+  unitOfMeasure   String   @map("unit_of_measure") @db.VarChar(20)
+  quantity        Decimal  @db.Decimal(20, 3)
+  unitPriceCents  BigInt   @map("unit_price_cents")
+  lineTotalCents  BigInt   @map("line_total_cents")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  purchaseOrder PurchaseOrder @relation(fields: [organizationId, purchaseOrderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, id], map: "purchase_order_items_organization_id_id_key")
+  @@unique([organizationId, purchaseOrderId, position], map: "purchase_order_items_organization_id_order_id_position_key")
+  @@map("purchase_order_items")
+}
+
+/// FR-053/MT-006. One counter per tenant, so `PO-000001` is the first order of *every*
+/// organization and no tenant can infer another's volume from its numbering.
+///
+/// Allocation is a single `INSERT … ON CONFLICT DO UPDATE … RETURNING` inside the issuance
+/// transaction: the row lock serializes concurrent issuances, and a rollback returns the
+/// counter with it, so a failed issuance consumes no visible number.
+model PurchaseOrderNumberSequence {
+  organizationId String   @id @map("organization_id") @db.Uuid
+  /// The value the *next* allocation will hand out. Starts at 1 and is never reused.
+  nextValue      BigInt   @default(1) @map("next_value")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("purchase_order_number_sequences")
+}
+
+/// REL-004. One durable client operation, remembered so a retry cannot repeat its effects.
+///
+/// What is stored is deliberately minimal: two digests and a bounded scalar outcome. The
+/// Idempotency-Key itself is never persisted — only its SHA-256 — and neither is the request
+/// body. `request_fingerprint` is a SHA-256 over the *normalized semantic* request, so the
+/// same key presented with a different meaning is refused (409) instead of replaying an
+/// answer to a question nobody asked.
+///
+/// Retention is not implemented in this phase, and that is a stated limitation rather than an
+/// oversight: rows accumulate until a retention capability exists. See
+/// docs/architecture/client-idempotency.md.
+model IdempotencyRecord {
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String              @map("organization_id") @db.Uuid
+  /// REL-004 records are actor-bound: two users presenting the same key are two operations.
+  actorId        String              @map("actor_id") @db.Uuid
+  operation      IdempotentOperation
+  idempotencyKeyHash Bytes           @map("idempotency_key_hash")
+  requestFingerprint Bytes           @map("request_fingerprint")
+  /// Scalars only, and never free text, a fiscal identifier, a name, an address or a token.
+  /// `null` exists only *inside* the reserving transaction; a deferred constraint trigger
+  /// refuses to commit a reservation that never completed.
+  outcome        Json?
+  completedAt    DateTime?           @map("completed_at") @db.Timestamptz(3)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor        User         @relation(fields: [organizationId, actorId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, actorId, operation, idempotencyKeyHash], map: "idempotency_records_organization_actor_operation_key_hash_key")
+  @@index([organizationId, createdAt], map: "idempotency_records_organization_id_created_at_idx")
+  @@map("idempotency_records")
 }

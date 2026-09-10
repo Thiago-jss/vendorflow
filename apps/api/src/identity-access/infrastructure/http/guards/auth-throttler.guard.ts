@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ThrottlerGuard } from "@nestjs/throttler";
-import { TooManyRequestsException } from "../exceptions/too-many-requests.exception";
+import { TooManyRequestsException } from "../../../../platform/http/too-many-requests.exception";
 
 /**
  * Source-address limit for the auth routes.

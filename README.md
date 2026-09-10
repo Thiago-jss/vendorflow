@@ -92,6 +92,19 @@ business state. The reasoning is in
 implementation in
 [`docs/architecture/reliable-side-effects.md`](docs/architecture/reliable-side-effects.md).
 
+The purchase workflow now runs end to end: a request is raised, submitted and approved by a
+manager, quoted by a buyer against registered suppliers, decided by a selected quote that
+re-evaluates the remaining approval ladder against the real price, approved by Purchasing and
+Finance where the policy requires it, and turned into a purchase order. Supplier fiscal identity,
+quote coverage, "exactly one winner" and "the order's supplier is the quote's supplier" are all
+enforced by PostgreSQL rather than by application convention; the reasoning is in
+[`docs/architecture/suppliers-quotes-purchase-orders.md`](docs/architecture/suppliers-quotes-purchase-orders.md).
+
+Submission, approval decisions, quote selection and purchase order issuance require an
+`Idempotency-Key` header, so a retried request replays its original result instead of producing a
+second one. What is stored, what fails closed and what is deliberately not implemented are in
+[`docs/architecture/client-idempotency.md`](docs/architecture/client-idempotency.md).
+
 Docker must be available when running the integration tests. The API tests start their own
 isolated PostgreSQL container and the worker tests start PostgreSQL **and** RabbitMQ; both apply
 the committed Prisma migration history and neither reuses or cleans the development database.

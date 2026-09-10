@@ -53,7 +53,22 @@ export const environmentSchema = z.object({
   // Same two routes, authenticated-principal dimension. Lower than the address limit: one
   // manager's own budget is smaller than what their whole office may share an address for.
   APPROVAL_PRINCIPAL_RATE_LIMIT: z.coerce.number().int().positive().default(30),
-  APPROVAL_PRINCIPAL_RATE_LIMIT_WINDOW_SECONDS: seconds(60)
+  APPROVAL_PRINCIPAL_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
+
+  // SEC-006. Quote selection: the widest transaction in the system, and the one that decides
+  // what Purchasing and Finance will be asked to approve. Its own budgets, so a burst of
+  // selections cannot spend an approver's allowance or the reverse.
+  QUOTE_SELECTION_IP_RATE_LIMIT: z.coerce.number().int().positive().default(30),
+  QUOTE_SELECTION_IP_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
+  QUOTE_SELECTION_PRINCIPAL_RATE_LIMIT: z.coerce.number().int().positive().default(15),
+  QUOTE_SELECTION_PRINCIPAL_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
+
+  // SEC-006. Purchase order issuance and cancellation. Issuance serializes every buyer in the
+  // organization on one counter row, so its budget is deliberately the tightest here.
+  PURCHASE_ORDER_IP_RATE_LIMIT: z.coerce.number().int().positive().default(30),
+  PURCHASE_ORDER_IP_RATE_LIMIT_WINDOW_SECONDS: seconds(60),
+  PURCHASE_ORDER_PRINCIPAL_RATE_LIMIT: z.coerce.number().int().positive().default(15),
+  PURCHASE_ORDER_PRINCIPAL_RATE_LIMIT_WINDOW_SECONDS: seconds(60)
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

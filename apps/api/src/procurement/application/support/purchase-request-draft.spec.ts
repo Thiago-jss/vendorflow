@@ -1,9 +1,9 @@
+import { MAXIMUM_STORABLE_CENTS } from "../../../platform/numeric/centavos";
 import { PurchaseRequestValidationError } from "../contracts/purchase-request.errors";
 import {
   normalizePurchaseRequestDraft,
   type PurchaseRequestDraftInput,
 } from "./purchase-request-draft";
-import { MAXIMUM_STORABLE_CENTS } from "./purchase-request-money";
 
 describe("purchase request draft invariants", () => {
   function draft(

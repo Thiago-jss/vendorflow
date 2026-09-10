@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { INestApplication } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Test } from "@nestjs/testing";
@@ -230,6 +231,18 @@ export function parseSetCookie(
     value: decodeURIComponent((pair ?? "").slice(name.length + 1)),
     attributes,
   };
+}
+
+/**
+ * REL-004's header, for the four durable operations that require one.
+ *
+ * A fresh token per call by default, because that is what a client does for a *new* intent; a
+ * test proving replay passes the same one twice on purpose.
+ */
+export function idempotencyHeaders(
+  key: string = randomUUID(),
+): Readonly<Record<string, string>> {
+  return { "idempotency-key": key };
 }
 
 /** The cookie header a browser would send back for the refresh cookie. */

@@ -11,12 +11,22 @@ import type {
   FindApprovalFlowCriteria,
   ListActionableStepsCriteria,
   MaterializeApprovalFlowInput,
+  ReevaluateApprovalFlowInput,
+  ReevaluatedApprovalFlowRecord,
 } from "../../application/contracts/approval-flow.repository";
-import { requiredApprovalSteps } from "../../application/support/approval-policy";
+import {
+  requiredApprovalSteps,
+  type ApprovalStepRole,
+} from "../../application/support/approval-policy";
+import {
+  planApprovalFlowReevaluation,
+  type ReevaluatedApprovalStep,
+} from "../../application/support/approval-reevaluation";
 import {
   UNDECIDED_APPROVAL_STEP_STATES,
   approvalFlowStateAfterDecision,
   materializeApprovalSteps,
+  shouldPromoteNextStepAfterDecision,
 } from "../../application/support/approval-step-state";
 import {
   toApprovalFlowState,
@@ -133,32 +143,36 @@ export class PrismaApprovalFlowRepository implements ApprovalFlowRepository {
     return steps.map((step) => toStepRecord(step));
   }
 
+  async findActionableStep(
+    criteria: FindApprovalFlowCriteria,
+  ): Promise<ApprovalStepRecord | null> {
+    // A partial unique index makes "at most one ACTIONABLE step per flow" an invariant of the
+    // table, so this reads the step the flow is waiting on rather than one of several.
+    const step = await this.database.approvalStep.findFirst({
+      where: {
+        organizationId: criteria.organizationId,
+        purchaseRequestId: criteria.purchaseRequestId,
+        state: "ACTIONABLE",
+      },
+      select: STEP_SELECTION,
+    });
+
+    return step === null ? null : toStepRecord(step);
+  }
+
   async decideActionableStep(
     scope: TransactionScope,
     input: DecideActionableStepInput,
   ): Promise<DecidedApprovalStepRecord | null> {
     const transaction = transactionClient(scope);
 
-    // The read identifies the step and classifies the failure; it is not what makes the
-    // decision safe. The UPDATE below re-states `state: ACTIONABLE`, so a decision that
-    // arrived a moment earlier leaves this one matching no row (REL-005).
-    const actionable = await transaction.approvalStep.findFirst({
-      where: {
-        organizationId: input.organizationId,
-        purchaseRequestId: input.purchaseRequestId,
-        role: input.role,
-        state: "ACTIONABLE",
-      },
-      select: { id: true, approvalFlowId: true },
-    });
-
-    if (actionable === null) {
-      return null;
-    }
-
+    // The caller already read this step to authorize against its responsibility. The UPDATE
+    // re-states `state: ACTIONABLE` *and* the step's identity and role, so a decision that
+    // arrived a moment earlier — or a promotion that made a different step actionable in the
+    // meantime — leaves this one matching no row (REL-005).
     const decided = await transaction.approvalStep.updateMany({
       where: {
-        id: actionable.id,
+        id: input.approvalStepId,
         organizationId: input.organizationId,
         purchaseRequestId: input.purchaseRequestId,
         role: input.role,
@@ -176,23 +190,47 @@ export class PrismaApprovalFlowRepository implements ApprovalFlowRepository {
       return null;
     }
 
+    const step = await transaction.approvalStep.findUniqueOrThrow({
+      where: {
+        organizationId_id: {
+          organizationId: input.organizationId,
+          id: input.approvalStepId,
+        },
+      },
+      select: STEP_SELECTION,
+    });
+
     // BR-004: a rejection ends the flow, so the steps that will never be decided are voided
     // rather than deleted — the history of what was required survives the refusal.
     if (input.decision === "REJECTED") {
       await transaction.approvalStep.updateMany({
         where: {
           organizationId: input.organizationId,
-          approvalFlowId: actionable.approvalFlowId,
+          approvalFlowId: step.approvalFlowId,
           state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
         },
         data: { state: "VOIDED" },
       });
     }
 
+    // FR-035. A Purchasing approval hands the ladder to Finance immediately, because the
+    // amount is already the selected quote total. A Manager approval promotes nothing: BR-002
+    // says the next rungs are evaluated against a total that does not exist yet, and BR-003's
+    // re-evaluation is what makes them actionable.
+    let promotedStep: ApprovalStepRecord | null = null;
+
+    if (shouldPromoteNextStepAfterDecision(input.role, input.decision)) {
+      promotedStep = await this.promoteEarliestUndecidedStep(
+        scope,
+        input.organizationId,
+        step.approvalFlowId,
+      );
+    }
+
     const undecidedStepsRemaining = await transaction.approvalStep.count({
       where: {
         organizationId: input.organizationId,
-        approvalFlowId: actionable.approvalFlowId,
+        approvalFlowId: step.approvalFlowId,
         state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
       },
     });
@@ -203,24 +241,185 @@ export class PrismaApprovalFlowRepository implements ApprovalFlowRepository {
 
     await transaction.approvalFlow.updateMany({
       where: {
-        id: actionable.approvalFlowId,
+        id: step.approvalFlowId,
         organizationId: input.organizationId,
         purchaseRequestId: input.purchaseRequestId,
       },
       data: { state: flowState },
     });
 
-    const step = await transaction.approvalStep.findUniqueOrThrow({
+    return { step: toStepRecord(step), flowState, promotedStep };
+  }
+
+  async reevaluateForSelectedQuote(
+    scope: TransactionScope,
+    input: ReevaluateApprovalFlowInput,
+  ): Promise<ReevaluatedApprovalFlowRecord | null> {
+    const transaction = transactionClient(scope);
+    const flow = await transaction.approvalFlow.findUnique({
       where: {
-        organizationId_id: {
+        organizationId_purchaseRequestId: {
           organizationId: input.organizationId,
-          id: actionable.id,
+          purchaseRequestId: input.purchaseRequestId,
         },
       },
+      select: FLOW_SELECTION,
+    });
+
+    if (flow === null) {
+      return null;
+    }
+
+    const current = toFlowRecord(flow);
+    // BR-003 is decided by a pure function of the current ladder and one amount, so all nine
+    // estimated-tier to selected-tier combinations are provable without a database (NFR-007).
+    // This method only applies what that function decided.
+    const plan = planApprovalFlowReevaluation({
+      steps: current.steps.map(
+        (step): ReevaluatedApprovalStep => ({
+          id: step.id,
+          sequence: step.sequence,
+          role: step.role,
+          state: step.state,
+          evaluatedAmountCents: step.evaluatedAmountCents,
+        }),
+      ),
+      currentFlowState: current.state,
+      selectedTotalCents: input.selectedTotalCents,
+    });
+
+    // Order matters: everything that stops being actionable happens before anything is
+    // promoted, so the partial unique index that allows one ACTIONABLE step per flow is never
+    // momentarily violated mid-transaction.
+    if (plan.voidedStepIds.length > 0) {
+      await transaction.approvalStep.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          approvalFlowId: current.id,
+          id: { in: [...plan.voidedStepIds] },
+          state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
+        },
+        data: { state: "VOIDED" },
+      });
+    }
+
+    // Every step that survives is demoted to PENDING first, for the same reason.
+    await transaction.approvalStep.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        approvalFlowId: current.id,
+        state: "ACTIONABLE",
+      },
+      data: { state: "PENDING" },
+    });
+
+    if (plan.repricedStepIds.length > 0) {
+      await transaction.approvalStep.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          approvalFlowId: current.id,
+          id: { in: [...plan.repricedStepIds] },
+          state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
+        },
+        data: { evaluatedAmountCents: input.selectedTotalCents },
+      });
+    }
+
+    if (plan.appendedSteps.length > 0) {
+      await transaction.approvalStep.createMany({
+        data: plan.appendedSteps.map((step) => ({
+          organizationId: input.organizationId,
+          approvalFlowId: current.id,
+          purchaseRequestId: input.purchaseRequestId,
+          sequence: step.sequence,
+          role: step.role,
+          state: "PENDING" as const,
+          evaluatedAmountCents: input.selectedTotalCents,
+        })),
+      });
+    }
+
+    const promotedSequence =
+      plan.promotedAppendedSequence ??
+      current.steps.find((step) => step.id === plan.promotedStepId)?.sequence ??
+      null;
+
+    if (promotedSequence !== null) {
+      await transaction.approvalStep.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          approvalFlowId: current.id,
+          sequence: promotedSequence,
+          state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
+        },
+        data: { state: "ACTIONABLE" },
+      });
+    }
+
+    await transaction.approvalFlow.updateMany({
+      where: {
+        id: current.id,
+        organizationId: input.organizationId,
+        purchaseRequestId: input.purchaseRequestId,
+      },
+      data: { state: plan.flowState },
+    });
+
+    const reevaluated = toFlowRecord(
+      await transaction.approvalFlow.findUniqueOrThrow({
+        where: {
+          organizationId_id: {
+            organizationId: input.organizationId,
+            id: current.id,
+          },
+        },
+        select: FLOW_SELECTION,
+      }),
+    );
+
+    return {
+      flow: reevaluated,
+      changed: plan.changed,
+      voidedStepCount: plan.voidedStepIds.length,
+      repricedStepCount: plan.repricedStepIds.length,
+      appendedStepRoles: plan.appendedSteps.map(
+        (step): ApprovalStepRole => step.role,
+      ),
+      actionableStep:
+        reevaluated.steps.find((step) => step.state === "ACTIONABLE") ?? null,
+    };
+  }
+
+  /**
+   * FR-035. Makes the earliest still-undecided rung of a flow the one it is waiting on.
+   * Returns `null` when nothing is left, which is how a completed ladder is recognized.
+   */
+  private async promoteEarliestUndecidedStep(
+    scope: TransactionScope,
+    organizationId: string,
+    approvalFlowId: string,
+  ): Promise<ApprovalStepRecord | null> {
+    const transaction = transactionClient(scope);
+    const next = await transaction.approvalStep.findFirst({
+      where: {
+        organizationId,
+        approvalFlowId,
+        state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] },
+      },
+      orderBy: { sequence: "asc" },
       select: STEP_SELECTION,
     });
 
-    return { step: toStepRecord(step), flowState };
+    if (next === null) {
+      return null;
+    }
+
+    await transaction.approvalStep.updateMany({
+      where: { id: next.id, organizationId, state: { in: [...UNDECIDED_APPROVAL_STEP_STATES] } },
+      data: { state: "ACTIONABLE" },
+    });
+
+    return toStepRecord({ ...next, state: "ACTIONABLE" });
   }
 
   async voidUnfinished(

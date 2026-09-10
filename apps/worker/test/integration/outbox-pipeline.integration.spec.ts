@@ -5,6 +5,7 @@ import { OUTBOX_DELIVERY_RECORDER } from "../../src/consumers/outbox-delivery-re
 import { OutboxMessageRepository } from "../../src/outbox/outbox-message.repository";
 import { OutboxPublisherService } from "../../src/outbox/outbox-publisher.service";
 import { RabbitMqService } from "../../src/messaging/rabbitmq.service";
+import type { TopologyNames } from "../../src/messaging/topology";
 import {
   WorkerIntegrationTestHarness,
   waitFor,
@@ -48,12 +49,51 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
       durable: true,
       autoDelete: true,
     });
-    await inspection.channel.bindQueue(
-      spyQueue,
-      harness.topology().eventsExchange,
-      harness.topology().bindingPattern,
-    );
+    // Every family, so the spy sees whatever the relay publishes rather than only the family
+    // this suite happens to insert.
+    for (const pattern of harness.topology().bindingPatterns) {
+      await inspection.channel.bindQueue(
+        spyQueue,
+        harness.topology().eventsExchange,
+        pattern,
+      );
+    }
   }, 300_000);
+
+  /**
+   * Makes the events exchange unroutable for every family at once. Unbinding one and leaving
+   * the other would prove nothing: the message would still reach a queue through the family
+   * that stayed bound.
+   */
+  async function unbindEveryFamily(topology: TopologyNames): Promise<void> {
+    for (const pattern of topology.bindingPatterns) {
+      await inspection.channel.unbindQueue(
+        topology.workQueue,
+        topology.eventsExchange,
+        pattern,
+      );
+      await inspection.channel.unbindQueue(
+        spyQueue,
+        topology.eventsExchange,
+        pattern,
+      );
+    }
+  }
+
+  async function bindEveryFamily(topology: TopologyNames): Promise<void> {
+    for (const pattern of topology.bindingPatterns) {
+      await inspection.channel.bindQueue(
+        topology.workQueue,
+        topology.eventsExchange,
+        pattern,
+      );
+      await inspection.channel.bindQueue(
+        spyQueue,
+        topology.eventsExchange,
+        pattern,
+      );
+    }
+  }
 
   beforeEach(async () => {
     await harness.clean();
@@ -81,14 +121,16 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
     overrides: {
       readonly organizationId?: string;
       readonly schemaVersion?: number;
+      readonly eventType?: "PURCHASE_REQUEST_SUBMITTED" | "PURCHASE_ORDER_ISSUED";
+      readonly aggregateType?: "PURCHASE_REQUEST" | "PURCHASE_ORDER";
     } = {},
   ): Promise<string> {
     const created = await harness.database.outboxMessage.create({
       data: {
         organizationId: overrides.organizationId ?? organizationId,
-        eventType: "PURCHASE_REQUEST_SUBMITTED",
+        eventType: overrides.eventType ?? "PURCHASE_REQUEST_SUBMITTED",
         schemaVersion: overrides.schemaVersion ?? 1,
-        aggregateType: "PURCHASE_REQUEST",
+        aggregateType: overrides.aggregateType ?? "PURCHASE_REQUEST",
         aggregateId: randomUUID(),
         correlationId: randomUUID(),
         occurredAt: new Date(),
@@ -154,6 +196,80 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
       { persistent: true, messageId: options.messageId, contentType: "application/json" },
     );
   }
+
+  describe("topology binds every event family, not only the first one", () => {
+    it("routes a purchase_order fact to the work queue (FR-062)", async () => {
+      // A purchase order is its own aggregate with its own namespace, so it reaches the work
+      // queue through the second binding rather than through purchase_request.#. Without that
+      // binding the relay's publish would come back as unroutable and the intent would sit
+      // there retrying forever.
+      const id = await insertIntent({
+        eventType: "PURCHASE_ORDER_ISSUED",
+        aggregateType: "PURCHASE_ORDER",
+      });
+
+      expect(await publisher.sweepOnce()).toBe(1);
+      expect((await readOutboxRow(id)).status).toBe("PUBLISHED");
+
+      const [published] = await drainSpyQueue();
+      expect(published?.properties.type).toBe("purchase_order.issued");
+      expect(published?.properties.messageId).toBe(id);
+
+      // The consumer is live, so the proof that the work queue received it is the durable
+      // receipt it left behind rather than a message still sitting in the queue.
+      await waitFor(
+        async () =>
+          (await harness.database.outboxConsumerReceipt.count({
+            where: { eventId: id },
+          })) === 1,
+        "the delivery receipt for a purchase_order fact",
+      );
+      await expect(
+        harness.database.outboxConsumerReceipt.findFirstOrThrow({
+          where: { eventId: id },
+          select: { eventType: true },
+        }),
+      ).resolves.toEqual({ eventType: "PURCHASE_ORDER_ISSUED" });
+    });
+
+    it("routes a purchase_order fact through every retry tier and to the DLQ", async () => {
+      const topology = harness.topology();
+      const body = Buffer.from(
+        JSON.stringify({ routingKey: "purchase_order.issued" }),
+        "utf8",
+      );
+
+      // Each retry tier is its own exchange, so each one has to carry both families or a
+      // delayed purchase-order message would be silently dropped on its way back.
+      for (const [index, retryExchange] of topology.retryExchanges.entries()) {
+        inspection.channel.publish(
+          retryExchange,
+          "purchase_order.issued",
+          body,
+          { persistent: true },
+        );
+
+        const retryQueue = topology.retryQueues[index] as string;
+        await waitFor(async () => {
+          const message = await inspection.channel.get(retryQueue, {
+            noAck: true,
+          });
+
+          return message !== false;
+        }, `a purchase_order message in ${retryQueue}`, 10_000);
+      }
+
+      inspection.channel.publish(
+        topology.deadLetterExchange,
+        "purchase_order.issued",
+        body,
+        { persistent: true },
+      );
+
+      const parked = await nextDeadLetter();
+      expect(parked.fields.routingKey).toBe("purchase_order.issued");
+    }, 60_000);
+  });
 
   describe("relay", () => {
     it("publishes a committed intent and records the publication", async () => {
@@ -246,16 +362,7 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
 
     it("retries an unroutable publication with backoff instead of losing it", async () => {
       const topology = harness.topology();
-      await inspection.channel.unbindQueue(
-        topology.workQueue,
-        topology.eventsExchange,
-        topology.bindingPattern,
-      );
-      await inspection.channel.unbindQueue(
-        spyQueue,
-        topology.eventsExchange,
-        topology.bindingPattern,
-      );
+      await unbindEveryFamily(topology);
 
       try {
         const id = await insertIntent();
@@ -268,31 +375,13 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
         expect(row.lastError).toContain("No queue is bound");
         expect(row.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
       } finally {
-        await inspection.channel.bindQueue(
-          topology.workQueue,
-          topology.eventsExchange,
-          topology.bindingPattern,
-        );
-        await inspection.channel.bindQueue(
-          spyQueue,
-          topology.eventsExchange,
-          topology.bindingPattern,
-        );
+        await bindEveryFamily(topology);
       }
     });
 
     it("parks an exhausted publication as FAILED and stops claiming it (REL-006)", async () => {
       const topology = harness.topology();
-      await inspection.channel.unbindQueue(
-        topology.workQueue,
-        topology.eventsExchange,
-        topology.bindingPattern,
-      );
-      await inspection.channel.unbindQueue(
-        spyQueue,
-        topology.eventsExchange,
-        topology.bindingPattern,
-      );
+      await unbindEveryFamily(topology);
 
       try {
         const id = await insertIntent();
@@ -315,16 +404,7 @@ describe("outbox pipeline (PostgreSQL + RabbitMQ)", () => {
         expect(await publisher.sweepOnce()).toBe(0);
         expect((await readOutboxRow(id)).status).toBe("FAILED");
       } finally {
-        await inspection.channel.bindQueue(
-          topology.workQueue,
-          topology.eventsExchange,
-          topology.bindingPattern,
-        );
-        await inspection.channel.bindQueue(
-          spyQueue,
-          topology.eventsExchange,
-          topology.bindingPattern,
-        );
+        await bindEveryFamily(topology);
       }
     });
 

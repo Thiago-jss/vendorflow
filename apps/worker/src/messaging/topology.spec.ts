@@ -21,6 +21,12 @@ describe("topologyNames", () => {
   });
 
   it("binds by event family rather than by a single event type", () => {
-    expect(names.bindingPattern).toBe("purchase_request.#");
+    // Two families, because there are two aggregates. A consumer that cares about purchase
+    // orders can bind to purchase_order.# without receiving every request transition, and a
+    // new event inside either family needs no topology change at all.
+    expect(names.bindingPatterns).toEqual([
+      "purchase_request.#",
+      "purchase_order.#",
+    ]);
   });
 });

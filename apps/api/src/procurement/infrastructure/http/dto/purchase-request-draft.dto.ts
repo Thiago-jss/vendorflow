@@ -9,11 +9,11 @@ import {
   MinLength,
   ValidateNested,
 } from "class-validator";
+import { CENTS_WIRE_PATTERN } from "../../../../platform/numeric/centavos";
 import {
   QUANTITY_DECIMAL_SCALE,
   QUANTITY_WIRE_PATTERN,
-} from "../../../application/support/decimal-quantity";
-import { CENTS_WIRE_PATTERN } from "../../../application/support/purchase-request-money";
+} from "../../../../platform/numeric/scaled-quantity";
 
 /**
  * SEC-004. The global `ValidationPipe` runs with `whitelist` and `forbidNonWhitelisted`, so

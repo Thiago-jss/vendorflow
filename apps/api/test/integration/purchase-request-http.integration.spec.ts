@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseService } from "@vendorflow/database";
 import {
   ApiIntegrationTestHarness,
+  idempotencyHeaders,
   type HttpTestResponse,
 } from "./api-test-harness";
 import { createTenant, type TenantFixture } from "./identity-fixtures";
@@ -254,9 +255,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
         expect(response.status).toBe(400);
       }
 
-      await expect(
-        database.purchaseRequest.count(),
-      ).resolves.toBe(0);
+      await expect(database.purchaseRequest.count()).resolves.toBe(0);
     });
 
     it("rejects a malformed payload at the boundary, before the domain sees it", async () => {
@@ -347,9 +346,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       expect(accepted.status).toBe(201);
       expect(accepted.body).toMatchObject({
         estimatedTotalCents: "0",
-        items: [
-          expect.objectContaining({ quantity: "99999999999999999.999" }),
-        ],
+        items: [expect.objectContaining({ quantity: "99999999999999999.999" })],
       });
     });
 
@@ -475,7 +472,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
 
       const submitted = await api.post(
         `/purchase-requests/${existing.id}/submit`,
-        { accessToken: nonEmployeeToken },
+        { headers: idempotencyHeaders(), accessToken: nonEmployeeToken },
       );
       expect(submitted.status).toBe(200);
 
@@ -492,6 +489,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       const { id } = await createDraft(tokenA);
 
       const submitted = await api.post(`/purchase-requests/${id}/submit`, {
+        headers: idempotencyHeaders(),
         accessToken: tokenA,
       });
       expect(submitted.status).toBe(200);
@@ -513,6 +511,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       expect(deleted.status).toBe(409);
 
       const resubmitted = await api.post(`/purchase-requests/${id}/submit`, {
+        headers: idempotencyHeaders(),
         accessToken: tokenA,
       });
       expect(resubmitted.status).toBe(409);
@@ -577,6 +576,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
 
       const fromSubmitted = await createDraft(tokenA);
       await api.post(`/purchase-requests/${fromSubmitted.id}/submit`, {
+        headers: idempotencyHeaders(),
         accessToken: tokenA,
       });
       const cancelledSubmitted = await api.post(
@@ -585,9 +585,12 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       );
       expect(cancelledSubmitted.status).toBe(200);
 
-      const again = await api.post(`/purchase-requests/${fromDraft.id}/cancel`, {
-        accessToken: tokenA,
-      });
+      const again = await api.post(
+        `/purchase-requests/${fromDraft.id}/cancel`,
+        {
+          accessToken: tokenA,
+        },
+      );
       expect(again.status).toBe(409);
     });
 
@@ -623,7 +626,7 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
         });
         const submitted = await api.post(
           `/purchase-requests/${target}/submit`,
-          { accessToken: tokenB },
+          { headers: idempotencyHeaders(), accessToken: tokenB },
         );
         const cancelled = await api.post(
           `/purchase-requests/${target}/cancel`,
@@ -637,7 +640,10 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
           expect(response.status).toBe(404);
           // Same status and same body: the response cannot be used to tell a foreign row
           // from a missing one (MT-004).
-          expect(response.body).toEqual({ statusCode: 404, message: "Not Found" });
+          expect(response.body).toEqual({
+            statusCode: 404,
+            message: "Not Found",
+          });
         }
       }
 
@@ -684,9 +690,9 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       expect(second.nextCursor).toBeNull();
 
       // Nothing of organization B appears on any page of organization A.
-      expect([...first.items, ...second.items].map((item) => item.id)).not.toContain(
-        foreign.id,
-      );
+      expect(
+        [...first.items, ...second.items].map((item) => item.id),
+      ).not.toContain(foreign.id);
     });
 
     it("returns summaries without the justification or the item lines", async () => {
@@ -725,9 +731,12 @@ describe("purchase request HTTP surface (PostgreSQL)", () => {
       });
       expect(unknownParameter.status).toBe(400);
 
-      const badCursor = await api.get("/purchase-requests?cursor=not-a-cursor", {
-        accessToken: tokenA,
-      });
+      const badCursor = await api.get(
+        "/purchase-requests?cursor=not-a-cursor",
+        {
+          accessToken: tokenA,
+        },
+      );
       expect(badCursor.status).toBe(400);
     });
   });
