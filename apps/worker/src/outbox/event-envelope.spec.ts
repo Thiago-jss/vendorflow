@@ -2,6 +2,7 @@ import {
   eventEnvelopeSchema,
   isSupportedEventType,
   routingKeyFor,
+  supportedEventTypes,
   toEventEnvelope
 } from "./event-envelope";
 
@@ -23,10 +24,30 @@ describe("routing keys", () => {
     expect(routingKeyFor("PURCHASE_REQUEST_APPROVAL_DECIDED")).toBe(
       "purchase_request.approval_decided"
     );
+    expect(routingKeyFor("PURCHASE_REQUEST_QUOTE_SELECTED")).toBe(
+      "purchase_request.quote_selected"
+    );
+  });
+
+  it("gives a purchase order its own namespace rather than a third request key", () => {
+    // A purchase order is its own aggregate with its own lifecycle, so a consumer can bind to
+    // purchase_order.# without also receiving every request transition in the tenant.
+    expect(routingKeyFor("PURCHASE_ORDER_ISSUED")).toBe("purchase_order.issued");
+  });
+
+  it("gives every supported event type a distinct routing key", () => {
+    const keys = supportedEventTypes.map((eventType) => routingKeyFor(eventType));
+
+    expect(new Set(keys).size).toBe(supportedEventTypes.length);
   });
 
   it("recognizes only the event types this worker implements", () => {
     expect(isSupportedEventType("PURCHASE_REQUEST_SUBMITTED")).toBe(true);
+    expect(isSupportedEventType("PURCHASE_ORDER_ISSUED")).toBe(true);
+    // FR-062 names no cancellation notification and nothing consumes one, so the API never
+    // emits it and this worker would treat it as poison.
+    expect(isSupportedEventType("PURCHASE_ORDER_CANCELLED")).toBe(false);
+    expect(isSupportedEventType("SUPPLIER_QUOTE_REGISTERED")).toBe(false);
     expect(isSupportedEventType("PURCHASE_REQUEST_CANCELLED")).toBe(false);
   });
 });

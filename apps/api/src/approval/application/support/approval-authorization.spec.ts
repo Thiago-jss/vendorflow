@@ -7,6 +7,7 @@ import {
   SelfApprovalNotAllowedError,
 } from "../contracts/approval.errors";
 import {
+  APPROVAL_STEP_SCOPE,
   assertMayDecideApprovalStep,
   assertNotSelfApproval,
   mayDecideApprovalStep,
@@ -52,6 +53,32 @@ describe("who may decide an approval step (AUTHZ-006)", () => {
     );
     expect(mayDecideApprovalStep(principal(["FINANCE"]), "FINANCE")).toBe(true);
     expect(mayDecideApprovalStep(principal(["BUYER"]), "FINANCE")).toBe(false);
+  });
+
+  it("refuses every other role on a Purchasing or Finance step, ADMIN included", () => {
+    for (const roles of [
+      [],
+      ["EMPLOYEE"],
+      ["MANAGER"],
+      ["ADMIN"],
+      ["EMPLOYEE", "MANAGER", "ADMIN"],
+    ] satisfies PrincipalRole[][]) {
+      expect(mayDecideApprovalStep(principal(roles), "PURCHASING")).toBe(false);
+      expect(mayDecideApprovalStep(principal(roles), "FINANCE")).toBe(false);
+    }
+
+    // And holding the wrong one of the two is still the wrong one.
+    expect(mayDecideApprovalStep(principal(["FINANCE"]), "PURCHASING")).toBe(false);
+    expect(mayDecideApprovalStep(principal(["BUYER"]), "FINANCE")).toBe(false);
+  });
+
+  it("bounds a Manager by department and Buyer and Finance by organization (AUTHZ-004)", () => {
+    // A Manager is a manager *of a boundary*; Buyer and Finance act for the whole tenant, which
+    // the requirement states outright. Narrowing them to a department would make most requests
+    // undecidable by the people responsible for deciding them.
+    expect(APPROVAL_STEP_SCOPE.MANAGER).toBe("DEPARTMENT");
+    expect(APPROVAL_STEP_SCOPE.PURCHASING).toBe("ORGANIZATION");
+    expect(APPROVAL_STEP_SCOPE.FINANCE).toBe("ORGANIZATION");
   });
 
   it("names the action and no resource, so a refusal confirms nothing exists", () => {

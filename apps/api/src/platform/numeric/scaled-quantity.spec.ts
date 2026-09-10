@@ -4,7 +4,7 @@ import {
   QUANTITY_DECIMAL_SCALE,
   formatQuantity,
   parseQuantity,
-} from "./decimal-quantity";
+} from "./scaled-quantity";
 
 describe("exact decimal quantity", () => {
   function parsed(value: string): bigint {

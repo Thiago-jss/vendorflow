@@ -1,24 +1,25 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { formatCalendarDate } from "../../../application/support/calendar-date";
+import { formatCalendarDate } from "../../../../platform/calendar/calendar-date";
+import { formatCents } from "../../../../platform/numeric/centavos";
+import {
+  QUANTITY_DECIMAL_SCALE,
+  formatQuantity,
+} from "../../../../platform/numeric/scaled-quantity";
+import type { PurchaseRequestSupplements } from "../../../application/contracts/purchase-request-supplements";
+import type { PurchaseRequestView } from "../../../application/contracts/purchase-request-view";
 import type {
   PurchaseRequestPage,
   PurchaseRequestSummaryRecord,
 } from "../../../application/contracts/purchase-request.repository";
-import type { PurchaseRequestView } from "../../../application/contracts/purchase-request-view";
-import {
-  QUANTITY_DECIMAL_SCALE,
-  formatQuantity,
-} from "../../../application/support/decimal-quantity";
-import { formatCents } from "../../../application/support/purchase-request-money";
 import {
   purchaseRequestStatuses,
   type PurchaseRequestStatus,
 } from "../../../application/support/purchase-request-status";
-import { encodePurchaseRequestCursor } from "./purchase-request-cursor";
 import {
   ApprovalFlowResponse,
   toApprovalFlowResponse,
 } from "./purchase-request-approval.response";
+import { encodePurchaseRequestCursor } from "./purchase-request-cursor";
 
 /**
  * The wire contract, declared separately from the persistence record so a column added to
@@ -60,6 +61,55 @@ export class PurchaseRequestItemResponse {
     example: "687375",
   })
   estimatedLineTotalCents!: string;
+}
+
+/**
+ * FR-026, added additively in this phase. The winning quote, summarized.
+ *
+ * It is a summary and not the quote: the selection rationale, the priced lines and the
+ * supplier's own details are reachable through the quotation routes, under that module's own
+ * authorization. What a requester's view of their own request needs is which supplier won, at
+ * what total, and by when it will arrive.
+ */
+export class SelectedQuoteSummaryResponse {
+  @ApiProperty({ format: "uuid" })
+  supplierQuoteId!: string;
+
+  @ApiProperty({ format: "uuid" })
+  supplierId!: string;
+
+  @ApiProperty({ description: "Integer centavos (BRL).", example: "699875" })
+  totalCents!: string;
+
+  @ApiProperty({ format: "date", example: "2026-12-31" })
+  validUntil!: string;
+
+  @ApiProperty()
+  deliveryLeadTimeDays!: number;
+
+  @ApiProperty({ format: "date-time" })
+  selectedAt!: string;
+}
+
+/** FR-026, added additively in this phase. The purchase order, summarized. */
+export class PurchaseOrderSummaryResponse {
+  @ApiProperty({ format: "uuid" })
+  purchaseOrderId!: string;
+
+  @ApiProperty({ example: "PO-000001" })
+  number!: string;
+
+  @ApiProperty({ enum: ["ISSUED", "CANCELLED"] })
+  status!: "ISSUED" | "CANCELLED";
+
+  @ApiProperty({ description: "Integer centavos (BRL).", example: "699875" })
+  totalCents!: string;
+
+  @ApiProperty({ format: "date-time" })
+  issuedAt!: string;
+
+  @ApiProperty({ format: "date-time", nullable: true, type: String })
+  cancelledAt!: string | null;
 }
 
 export class PurchaseRequestResponse {
@@ -117,6 +167,22 @@ export class PurchaseRequestResponse {
       "FR-026. The approval flow materialized at submission: the step it is waiting on and the full ordered history. Null while the request is a DRAFT, which has no flow.",
   })
   approval!: ApprovalFlowResponse | null;
+
+  @ApiProperty({
+    type: SelectedQuoteSummaryResponse,
+    nullable: true,
+    description:
+      "FR-026, added in this phase. The winning quote once one has been selected, and null before that. Existing clients that ignore it are unaffected.",
+  })
+  selectedQuote!: SelectedQuoteSummaryResponse | null;
+
+  @ApiProperty({
+    type: PurchaseOrderSummaryResponse,
+    nullable: true,
+    description:
+      "FR-026, added in this phase. The purchase order once one has been issued, and null before that.",
+  })
+  purchaseOrder!: PurchaseOrderSummaryResponse | null;
 }
 
 /** A list row. The justification and the item lines stay out of a collection response. */
@@ -192,6 +258,45 @@ export function toPurchaseRequestResponse(
       view.approvalFlow === null
         ? null
         : toApprovalFlowResponse(view.approvalFlow),
+    ...toSupplementResponses(view.supplements),
+  };
+}
+
+/**
+ * The two additive fields, built from whatever the inverted ports returned. Both are `null`
+ * when the corresponding module is absent or has nothing yet, so the response shape is stable
+ * whether or not quotation and ordering are wired in.
+ */
+function toSupplementResponses(supplements: PurchaseRequestSupplements): {
+  selectedQuote: SelectedQuoteSummaryResponse | null;
+  purchaseOrder: PurchaseOrderSummaryResponse | null;
+} {
+  const quote = supplements.selectedQuote;
+  const order = supplements.purchaseOrder;
+
+  return {
+    selectedQuote:
+      quote === null
+        ? null
+        : {
+            supplierQuoteId: quote.supplierQuoteId,
+            supplierId: quote.supplierId,
+            totalCents: formatCents(quote.totalCents),
+            validUntil: formatCalendarDate(quote.validUntil),
+            deliveryLeadTimeDays: quote.deliveryLeadTimeDays,
+            selectedAt: quote.selectedAt.toISOString(),
+          },
+    purchaseOrder:
+      order === null
+        ? null
+        : {
+            purchaseOrderId: order.purchaseOrderId,
+            number: order.number,
+            status: order.status,
+            totalCents: formatCents(order.totalCents),
+            issuedAt: order.issuedAt.toISOString(),
+            cancelledAt: order.cancelledAt?.toISOString() ?? null,
+          },
   };
 }
 

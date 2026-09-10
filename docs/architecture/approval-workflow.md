@@ -357,13 +357,85 @@ security-relevant descriptions.
 
 | Deferred | Why, and what it waits on |
 | --- | --- |
-| Purchasing and Finance decision execution | BR-002 evaluates them against the selected quote total. Quotation does not exist; the steps are materialized and `PENDING`, and no route can act on them |
-| Quote-triggered flow extension and voiding (BR-003) | Same reason. `ApprovalFlowState` and the `VOIDED` step state already carry the vocabulary it will need |
+| ~~Purchasing and Finance decision execution~~ | **Implemented in Phase 9.** See § "Post-quotation decisions" below |
+| ~~Quote-triggered flow extension and voiding (BR-003)~~ | **Implemented in Phase 9.** See § "Post-quotation decisions" below |
 | Per-tenant configurable thresholds | § 12.1: the policy is code in the MVP. It is one pure function of an amount, so it can become data without the workflow changing |
 | Administrator audit querying (FR-061, AUD-006) | A query surface needs an administrator surface and its own authorization story. The `audit` module publishes only the write direction |
-| Idempotency keys (REL-004) | Not implemented, and not faked. A duplicate submission or decision is already harmless — the second loses the compare-and-swap and gets `409` — but that is *at-most-once by conflict*, not an idempotency contract: a retried request cannot recover the original response. A real REL-004 key belongs with the outbox work |
-| Transactional outbox, RabbitMQ, notifications (REL-002, REL-006, FR-062) | ADR-003's subject. Nothing here emits a message or plans to |
+| ~~Idempotency keys (REL-004)~~ | **Implemented in Phase 9.** Submission and the approval decision now require an `Idempotency-Key`; see `docs/architecture/client-idempotency.md` |
+| ~~Transactional outbox and RabbitMQ (REL-002, REL-006)~~ | **Implemented in Phase 8.** Notification *delivery* (FR-062, FR-063) is still deferred: the outgoing facts are committed and published, and nothing consumes them into a notification yet |
 | Hash chaining and external anchoring (AUD-007) | Explicitly out of the MVP. The event shape does not preclude it |
 | Approval delegation and substitute approvers | § 12.2. An absent manager stalls the request; nothing models it |
 | Frontend | Out of scope for the whole backend phase set so far |
 | A department-scoped detail read for managers | The queue carries summaries, as every collection response in this module does. A manager reviewing a request's items needs a read this phase does not add |
+
+---
+
+## Post-quotation decisions (Phase 9)
+
+Three things changed when quotation arrived. Each one is recorded here because the reasoning is
+not visible in the code that resulted from it.
+
+### The step decides who may act, not the route
+
+The decision route is no longer Manager-only. The flow is waiting on exactly one step; that step
+names a responsibility; the principal is checked against **that** (AUTHZ-006).
+
+The alternative — a route per responsibility, or a `role` field in the payload — would let
+someone holding both MANAGER and BUYER pick whichever rung happened to be available. It would
+also make the client responsible for knowing which route to call, which is a fact about the
+server's state that the client cannot reliably have.
+
+One consequence is worth stating plainly, because it is a **behavioural change from Phase 8**:
+a BUYER acting on a request whose Purchasing rung is still `PENDING` now receives `409`, where
+before they received `403`. Both refuse, and `409` is the accurate one: they are not missing a
+capability, they are acting on a rung that is not waiting on anyone yet.
+
+### Scope differs by responsibility, and the read has to respect that first
+
+AUTHZ-004 puts a Manager at Department scope and Buyer and Finance at organization scope. So the
+request is read under the **narrowest scope the principal could ever act in** — their Department
+when they hold only MANAGER, the organization when they hold BUYER or FINANCE — *before* the
+actionable step is looked up.
+
+That ordering is what keeps MT-004's parity intact. Reading tenant-wide first would let a manager
+distinguish "exists in my tenant but outside my department, and its ladder is idle" (`409`) from
+"does not exist" (`404`).
+
+A cheap gate runs before even that read: a principal holding none of MANAGER, BUYER or FINANCE is
+refused outright, so an EMPLOYEE or a lone ADMIN cannot use the difference between `403` and
+`404` to discover whether a request exists.
+
+### BR-003 re-evaluation is a pure function
+
+`approval/application/support/approval-reevaluation.ts` takes the current ladder, the flow's
+state and one amount, and returns a plan: which steps to void, which to reprice, which to append,
+which one to promote, and whether anything changed at all. It touches no database, no clock and
+no principal, so all nine estimated-tier to selected-tier combinations are provable without
+infrastructure (NFR-007).
+
+The rules it encodes, and why:
+
+- **The Manager step is untouchable.** BR-002 evaluates it against the *estimated* total and it
+  has already gated entry into quotation. Re-pricing a decision someone already made against a
+  different number would rewrite history; voiding it would un-approve the very step that
+  authorized the quotation work.
+- **A decided step is never re-appended.** A tier requiring PURCHASING when a PURCHASING step
+  exists in any non-voided state is already satisfied by that step; adding a second would ask the
+  same person to approve the same request twice.
+- **A step is repriced only when the amount actually changes.** A selected total that lands on
+  the estimate leaves the ladder alone, so `changed` stays honest and the trail is not filled
+  with re-evaluations that re-evaluated nothing.
+- **Exactly one step is promoted** — the earliest remaining undecided one (FR-035). The
+  repository applies the plan in an order that never leaves two `ACTIONABLE` steps even
+  momentarily, because a partial unique index refuses that outright.
+
+An `APPROVAL_FLOW_REEVALUATED` audit event is written **only when the ladder actually moved**.
+"The rule was consulted" is not an audited action; "two steps were voided and Finance was
+appended" is.
+
+### Promotion after a decision
+
+`shouldPromoteNextStepAfterDecision` states the asymmetry: a **Manager** approval promotes
+nothing, because BR-002 says the next rungs are evaluated against a total that does not exist
+yet. A **Purchasing** approval promotes Finance immediately, because by then the amount already
+*is* the selected quote total.

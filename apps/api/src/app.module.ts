@@ -4,6 +4,9 @@ import { ApplicationConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
 import { IdentityAccessModule } from "./identity-access/identity-access.module";
 import { ProcurementModule } from "./procurement/procurement.module";
+import { PurchaseOrderModule } from "./purchase-order/purchase-order.module";
+import { QuotationModule } from "./quotation/quotation.module";
+import { SupplierModule } from "./supplier/supplier.module";
 import {
   CORRELATION_HEADER,
   newCorrelationId,
@@ -49,6 +52,9 @@ import { TenantContextModule } from "./platform/tenancy/tenant-context.module";
     TenantContextModule,
     IdentityAccessModule,
     ProcurementModule,
+    SupplierModule,
+    QuotationModule,
+    PurchaseOrderModule,
     HealthModule,
   ],
 })

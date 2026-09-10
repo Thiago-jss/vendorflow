@@ -1,7 +1,7 @@
+import type { ScaledQuantity } from "../../../platform/numeric/scaled-quantity";
 import type { TransactionScope } from "../../../platform/persistence/transaction-scope";
-import type { PurchaseRequestStatus } from "../support/purchase-request-status";
 import type { NormalizedPurchaseRequestDraftItem } from "../support/purchase-request-draft";
-import type { ScaledQuantity } from "../support/decimal-quantity";
+import type { PurchaseRequestStatus } from "../support/purchase-request-status";
 
 export const PURCHASE_REQUEST_REPOSITORY = Symbol(
   "PURCHASE_REQUEST_REPOSITORY",
@@ -12,7 +12,7 @@ export interface PurchaseRequestItemRecord {
   readonly position: number;
   readonly description: string;
   readonly unitOfMeasure: string;
-  /** Thousandths of a unit; exact, never a binary float. See `decimal-quantity.ts`. */
+  /** Thousandths of a unit; exact, never a binary float. See `platform/numeric/scaled-quantity.ts`. */
   readonly quantityScaled: ScaledQuantity;
   readonly estimatedUnitPriceCents: bigint;
   /** BR-033: already rounded half-up, once, at the line. */
@@ -115,14 +115,65 @@ export interface CancelPurchaseRequestInput extends OwnPurchaseRequestCriteria {
 }
 
 /**
- * FR-032. The request half of an approval decision. There is no `requesterId`: the actor is
- * not the owner, and the department is what bounds them instead. The permitted source states
- * travel with the command so they end up in the WHERE clause of the write.
+ * A read or write bounded by tenant alone. AUTHZ-004 puts Buyer and Finance at organization
+ * scope, so this is the criteria their operations take — and it is a *narrower* type than an
+ * optional department, not a wider one: there is no way to express "any tenant".
+ */
+export interface OrganizationPurchaseRequestCriteria {
+  readonly organizationId: string;
+  readonly purchaseRequestId: string;
+}
+
+/**
+ * FR-032/FR-034. The request half of an approval decision. There is no `requesterId`: the
+ * actor is not the owner. `departmentId` is present only for a Manager decision, whose
+ * responsibility boundary is a Department (AUTHZ-004); a Purchasing or Finance decision is
+ * organization-scoped and leaves it undefined rather than passing a value that would silently
+ * narrow the write.
+ *
+ * `toStatus` is `null` for an approval that leaves a further rung standing: the request keeps
+ * its state, and the conditional write still runs so the permitted source states are proven
+ * and the row is locked in the same order every other operation locks it.
  */
 export interface ApplyApprovalDecisionInput
-  extends DepartmentPurchaseRequestCriteria {
+  extends OrganizationPurchaseRequestCriteria {
+  readonly departmentId?: string;
   readonly fromStatuses: readonly PurchaseRequestStatus[];
+  readonly toStatus: PurchaseRequestStatus | null;
+}
+
+/**
+ * FR-045. The request half of a quote selection, driven by `quotation` through a published
+ * operation. The target is decided by BR-003's re-evaluation, never by a client.
+ */
+export interface ApplyQuoteSelectionInput
+  extends OrganizationPurchaseRequestCriteria {
   readonly toStatus: PurchaseRequestStatus;
+}
+
+/** FR-052. The request half of a purchase order issuance, driven by `purchase-order`. */
+export type ApplyOrderIssuedInput = OrganizationPurchaseRequestCriteria;
+
+/**
+ * BR-020/FR-050. Proves — under a row lock — that a request is in one of the states an
+ * operation requires, before anything derived from it is written.
+ *
+ * This is the operation `quotation` and `purchase-order` call first, and the reason the lock
+ * order in this system is always "request, then quote or flow, then derived rows". Two
+ * operations that take the same rows in opposite orders deadlock; one that never reads the
+ * request's state under a lock races it instead.
+ */
+export interface LockPurchaseRequestInput
+  extends OrganizationPurchaseRequestCriteria {
+  readonly requiredStatuses: readonly PurchaseRequestStatus[];
+}
+
+/** FR-030's Buyer counterpart: the organization's requests in a given set of states. */
+export interface ListOrganizationPurchaseRequestsCriteria {
+  readonly organizationId: string;
+  readonly statuses: readonly PurchaseRequestStatus[];
+  readonly limit: number;
+  readonly after: PurchaseRequestListCursor | null;
 }
 
 /** Keyset position in the requester's own list, ordered newest first. */
@@ -173,6 +224,11 @@ export interface PurchaseRequestRepository {
     criteria: DepartmentPurchaseRequestCriteria,
   ): Promise<PurchaseRequestRecord | null>;
 
+  /** AUTHZ-004. The same read at organization scope, for Buyer and Finance operations. */
+  findOrganizationRequest(
+    criteria: OrganizationPurchaseRequestCriteria,
+  ): Promise<PurchaseRequestRecord | null>;
+
   listOwnRequests(
     criteria: ListOwnPurchaseRequestsCriteria,
   ): Promise<PurchaseRequestPage>;
@@ -180,6 +236,11 @@ export interface PurchaseRequestRepository {
   /** FR-030. One department's requests in the given states, newest first. */
   listDepartmentRequests(
     criteria: ListDepartmentPurchaseRequestsCriteria,
+  ): Promise<PurchaseRequestPage>;
+
+  /** FR-040's Buyer queue: the whole organization's requests in the given states. */
+  listOrganizationRequests(
+    criteria: ListOrganizationPurchaseRequestsCriteria,
   ): Promise<PurchaseRequestPage>;
 
   replaceOwnDraft(
@@ -199,6 +260,26 @@ export interface PurchaseRequestRepository {
   applyApprovalDecision(
     scope: TransactionScope,
     input: ApplyApprovalDecisionInput,
+  ): Promise<PurchaseRequestRecord | null>;
+
+  /**
+   * Takes the request's row lock and re-reads it, returning `null` when its state is not one
+   * of the required ones. Everything a quotation or an ordering transaction writes is
+   * conditional on having won this first.
+   */
+  lockRequestInStatuses(
+    scope: TransactionScope,
+    input: LockPurchaseRequestInput,
+  ): Promise<PurchaseRequestRecord | null>;
+
+  applyQuoteSelection(
+    scope: TransactionScope,
+    input: ApplyQuoteSelectionInput,
+  ): Promise<PurchaseRequestRecord | null>;
+
+  applyOrderIssued(
+    scope: TransactionScope,
+    input: ApplyOrderIssuedInput,
   ): Promise<PurchaseRequestRecord | null>;
 
   /** FR-022. Returns false when no DRAFT row of this requester matched. */

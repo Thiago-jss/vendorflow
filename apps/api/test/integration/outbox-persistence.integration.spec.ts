@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseService } from "@vendorflow/database";
-import { ApiIntegrationTestHarness } from "./api-test-harness";
+import {
+  ApiIntegrationTestHarness,
+  idempotencyHeaders,
+} from "./api-test-harness";
 import {
   createTenant,
   createUser,
@@ -111,6 +114,7 @@ describe("transactional outbox (PostgreSQL)", () => {
 
     const { id } = created.body as { readonly id: string };
     const submitted = await api.post(`/purchase-requests/${id}/submit`, {
+      headers: idempotencyHeaders(),
       accessToken: requesterToken,
     });
     expect(submitted.status).toBe(200);
@@ -168,6 +172,7 @@ describe("transactional outbox (PostgreSQL)", () => {
       const decided = await api.post(
         `/purchase-requests/${purchaseRequestId}/approval-decision`,
         {
+          headers: idempotencyHeaders(),
           accessToken: managerToken,
           body: { decision: "REJECTED", reason: REJECTION_REASON },
         },
@@ -227,7 +232,7 @@ describe("transactional outbox (PostgreSQL)", () => {
       const { purchaseRequestId } = await submit();
       const repeated = await api.post(
         `/purchase-requests/${purchaseRequestId}/submit`,
-        { accessToken: requesterToken },
+        { headers: idempotencyHeaders(), accessToken: requesterToken },
       );
 
       expect(repeated.status).toBe(409);
@@ -243,6 +248,7 @@ describe("transactional outbox (PostgreSQL)", () => {
       const refused = await api.post(
         `/purchase-requests/${purchaseRequestId}/approval-decision`,
         {
+          headers: idempotencyHeaders(),
           accessToken: managerToken,
           // FR-031's ten-character minimum. Refused at the boundary, so no transaction opens.
           body: { decision: "REJECTED", reason: "no" },
@@ -267,7 +273,11 @@ describe("transactional outbox (PostgreSQL)", () => {
       const foreignToken = await login(foreignManager);
       const refused = await api.post(
         `/purchase-requests/${purchaseRequestId}/approval-decision`,
-        { accessToken: foreignToken, body: { decision: "APPROVED" } },
+        {
+          headers: idempotencyHeaders(),
+          accessToken: foreignToken,
+          body: { decision: "APPROVED" },
+        },
       );
 
       expect(refused.status).toBe(404);

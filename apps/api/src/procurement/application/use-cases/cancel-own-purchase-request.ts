@@ -22,6 +22,7 @@ import {
   REQUESTER_CANCELLABLE_STATUSES,
   isRequesterTransitionAllowed,
 } from "../support/purchase-request-status";
+import { ReadPurchaseRequestSupplements } from "./read-purchase-request-supplements";
 
 /**
  * FR-025 and BR-013. The requester cancels their own request while it is still ahead of
@@ -45,6 +46,7 @@ export class CancelOwnPurchaseRequest {
     private readonly voidApprovalFlowForRequest: VoidApprovalFlowForRequest,
     private readonly getApprovalFlowForRequest: GetApprovalFlowForRequest,
     private readonly recordAuditEvent: RecordAuditEvent,
+    private readonly readPurchaseRequestSupplements: ReadPurchaseRequestSupplements,
   ) {}
 
   async execute(
@@ -102,12 +104,17 @@ export class CancelOwnPurchaseRequest {
       return cancelled;
     });
 
-    return {
-      request,
-      approvalFlow: await this.getApprovalFlowForRequest.execute({
+    const [approvalFlow, supplements] = await Promise.all([
+      this.getApprovalFlowForRequest.execute({
         organizationId: principal.organizationId,
         purchaseRequestId: request.id,
       }),
-    };
+      this.readPurchaseRequestSupplements.execute(
+        principal.organizationId,
+        request,
+      ),
+    ]);
+
+    return { request, approvalFlow, supplements };
   }
 }

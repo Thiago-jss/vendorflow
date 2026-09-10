@@ -107,6 +107,9 @@ describe("generated OpenAPI document", () => {
   });
 
   it("exposes every purchase request path and method", () => {
+    // Quotation nests its routes under the request they belong to, because a quote has no life
+    // outside one. They are a different module's controller sharing a prefix, which is exactly
+    // why this assertion enumerates the whole prefix rather than one controller's routes.
     expect(
       Object.entries(document.paths)
         .filter(([path]) => path.startsWith("/purchase-requests"))
@@ -118,10 +121,15 @@ describe("generated OpenAPI document", () => {
       "DELETE /purchase-requests/{purchaseRequestId}",
       "GET /purchase-requests",
       "GET /purchase-requests/awaiting-my-approval",
+      "GET /purchase-requests/awaiting-quotation",
       "GET /purchase-requests/{purchaseRequestId}",
+      "GET /purchase-requests/{purchaseRequestId}/quotes",
       "POST /purchase-requests",
       "POST /purchase-requests/{purchaseRequestId}/approval-decision",
       "POST /purchase-requests/{purchaseRequestId}/cancel",
+      "POST /purchase-requests/{purchaseRequestId}/quotes",
+      "POST /purchase-requests/{purchaseRequestId}/quotes/{supplierQuoteId}/select",
+      "POST /purchase-requests/{purchaseRequestId}/quotes/{supplierQuoteId}/withdraw",
       "POST /purchase-requests/{purchaseRequestId}/submit",
       "PUT /purchase-requests/{purchaseRequestId}",
     ]);
@@ -192,7 +200,11 @@ describe("generated OpenAPI document", () => {
       "items",
       "justification",
       "neededBy",
+      // FR-026, added in this phase. Both are null until the corresponding thing exists, so an
+      // existing client that ignores them is unaffected.
+      "purchaseOrder",
       "requesterId",
+      "selectedQuote",
       "status",
       "submittedAt",
       "updatedAt",
@@ -334,6 +346,42 @@ describe("generated OpenAPI document", () => {
     );
   });
 
+  it("documents the quote comparison as a bounded keyset page (FR-043, NFR-004)", () => {
+    const comparison = operation(
+      "/purchase-requests/{purchaseRequestId}/quotes",
+      "get",
+    );
+
+    expect(
+      comparison.responses["200"]?.content?.["application/json"]?.schema.$ref,
+    ).toBe("#/components/schemas/SupplierQuoteListResponse");
+    expect(
+      (comparison.parameters ?? [])
+        .filter((parameter) => parameter.in === "query")
+        .map((parameter) => parameter.name)
+        .sort(),
+    ).toEqual(["cursor", "limit"]);
+    expect(
+      (comparison.parameters ?? [])
+        .filter((parameter) => parameter.in === "query")
+        .every((parameter) => parameter.required !== true),
+    ).toBe(true);
+    // A malformed cursor and an out-of-range page size are stated outcomes of this route.
+    expect(Object.keys(comparison.responses).sort()).toEqual([
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+    ]);
+
+    const page = schema("SupplierQuoteListResponse");
+    expect(page.properties?.items?.items?.$ref).toBe(
+      "#/components/schemas/SupplierQuoteResponse",
+    );
+    expect(page.properties?.nextCursor?.nullable).toBe(true);
+  });
+
   it("documents the paginated list parameters", () => {
     const list = operation("/purchase-requests", "get");
     const parameters = (list.parameters ?? []).filter(
@@ -365,7 +413,9 @@ describe("generated OpenAPI document", () => {
         operation("/purchase-requests/{purchaseRequestId}/submit", "post")
           .responses,
       ).sort(),
-    ).toEqual(["200", "401", "404", "409"]);
+      // 400 joins the list in this phase: REL-004 requires an Idempotency-Key here, and a
+      // missing or malformed one is a controlled bad request.
+    ).toEqual(["200", "400", "401", "404", "409"]);
 
     expect(
       Object.keys(

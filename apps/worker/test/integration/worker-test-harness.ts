@@ -200,7 +200,7 @@ export class WorkerIntegrationTestHarness {
         (tier) => `${this.topologyPrefix}.purchase-request-events.retry.${tier}`,
       ),
       deadLetterQueue: `${this.topologyPrefix}.purchase-request-events.dlq`,
-      bindingPattern: "purchase_request.#",
+      bindingPatterns: ["purchase_request.#", "purchase_order.#"],
     };
   }
 

@@ -3,7 +3,9 @@ import { DatabaseModule } from "@vendorflow/database";
 import { TransactionModule } from "../platform/persistence/transaction.module";
 import { APPROVAL_FLOW_REPOSITORY } from "./application/contracts/approval-flow.repository";
 import { DecideActionableApprovalStep } from "./application/use-cases/decide-actionable-approval-step";
+import { GetActionableApprovalStep } from "./application/use-cases/get-actionable-approval-step";
 import { GetApprovalFlowForRequest } from "./application/use-cases/get-approval-flow-for-request";
+import { ReevaluateApprovalFlow } from "./application/use-cases/reevaluate-approval-flow";
 import { ListActionableApprovalSteps } from "./application/use-cases/list-actionable-approval-steps";
 import { MaterializeApprovalFlow } from "./application/use-cases/materialize-approval-flow";
 import { VoidApprovalFlowForRequest } from "./application/use-cases/void-approval-flow-for-request";
@@ -20,8 +22,10 @@ import { PrismaApprovalFlowRepository } from "./infrastructure/persistence/prism
  * is the set of operations that orchestration may perform on the approval ladder, each
  * tenant-scoped by construction; the ladder's tables are reachable no other way.
  *
- * Purchasing and Finance decisioning is deliberately absent. BR-002 evaluates those steps
- * against the selected quote total, and quotation does not exist yet.
+ * Purchasing and Finance decisioning arrives with quotation. BR-002 evaluates those steps
+ * against the selected quote total, so `ReevaluateApprovalFlow` is what makes them actionable
+ * — and it is published for `quotation` to call inside the selection transaction, never a
+ * reason for this module to learn what a quote is.
  */
 @Module({
   imports: [DatabaseModule, TransactionModule],
@@ -33,15 +37,19 @@ import { PrismaApprovalFlowRepository } from "./infrastructure/persistence/prism
     },
     MaterializeApprovalFlow,
     GetApprovalFlowForRequest,
+    GetActionableApprovalStep,
     ListActionableApprovalSteps,
     DecideActionableApprovalStep,
+    ReevaluateApprovalFlow,
     VoidApprovalFlowForRequest,
   ],
   exports: [
     MaterializeApprovalFlow,
     GetApprovalFlowForRequest,
+    GetActionableApprovalStep,
     ListActionableApprovalSteps,
     DecideActionableApprovalStep,
+    ReevaluateApprovalFlow,
     VoidApprovalFlowForRequest,
   ],
 })

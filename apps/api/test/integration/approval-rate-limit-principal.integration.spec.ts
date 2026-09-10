@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseService } from "@vendorflow/database";
 import {
   ApiIntegrationTestHarness,
+  idempotencyHeaders,
   type HttpTestResponse,
 } from "./api-test-harness";
 import {
@@ -127,7 +128,7 @@ describe("approval routes' per-principal limit (PostgreSQL)", () => {
     const { id: purchaseRequestId } = created.body as { readonly id: string };
     const submitted = await api.post(
       `/purchase-requests/${purchaseRequestId}/submit`,
-      { accessToken: requesterToken },
+      { headers: idempotencyHeaders(), accessToken: requesterToken },
     );
     expect(submitted.status).toBe(200);
 
@@ -172,10 +173,10 @@ describe("approval routes' per-principal limit (PostgreSQL)", () => {
     purchaseRequestId: string,
     body: unknown,
   ): Promise<HttpTestResponse> {
-    return api.post(`/purchase-requests/${purchaseRequestId}/approval-decision`, {
-      accessToken,
-      body,
-    });
+    return api.post(
+      `/purchase-requests/${purchaseRequestId}/approval-decision`,
+      { headers: idempotencyHeaders(), accessToken, body },
+    );
   }
 });
 

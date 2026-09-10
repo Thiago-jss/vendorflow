@@ -3,7 +3,7 @@ import type {
   ApprovalFlowState,
   ApprovalStepState,
 } from "../../../approval/application/support/approval-step-state";
-import { formatCents } from "./purchase-request-money";
+import { formatCents } from "../../../platform/numeric/centavos";
 import type { PurchaseRequestStatus } from "./purchase-request-status";
 
 /**

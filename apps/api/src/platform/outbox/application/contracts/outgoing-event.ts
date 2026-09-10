@@ -4,15 +4,27 @@
  * The list is closed and it grows the way `AuditEventType` grows: a value is added when the
  * transition that emits it exists. There is no generic event bus and no universal schema
  * here, because neither has a caller (ADR-003).
+ *
+ * Four values, and the ones that are **absent** are as deliberate as the ones present. There is
+ * no quote-registered, quote-withdrawn, supplier-created or purchase-order-cancelled event,
+ * because FR-062 asks for notifications on the next actor, on approval, on rejection and on
+ * order issuance — and no consumer in this system subscribes to anything else. An event with no
+ * reader is not a feature: it is a retry ladder, a dead-letter queue and an operational surface
+ * that nothing justifies.
  */
 export const outgoingEventTypes = [
   "PURCHASE_REQUEST_SUBMITTED",
   "PURCHASE_REQUEST_APPROVAL_DECIDED",
+  "PURCHASE_REQUEST_QUOTE_SELECTED",
+  "PURCHASE_ORDER_ISSUED",
 ] as const;
 
 export type OutgoingEventType = (typeof outgoingEventTypes)[number];
 
-export const outgoingAggregateTypes = ["PURCHASE_REQUEST"] as const;
+export const outgoingAggregateTypes = [
+  "PURCHASE_REQUEST",
+  "PURCHASE_ORDER",
+] as const;
 
 export type OutgoingAggregateType = (typeof outgoingAggregateTypes)[number];
 

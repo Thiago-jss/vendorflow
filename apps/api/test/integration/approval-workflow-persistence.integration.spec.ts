@@ -8,12 +8,16 @@ import type {
   AuditEventRepository,
 } from "../../src/audit/application/contracts/audit-event.repository";
 import { RecordAuditEvent } from "../../src/audit/application/use-cases/record-audit-event";
+import { ExecuteIdempotently } from "../../src/platform/idempotency/application/use-cases/execute-idempotently";
+import { PrismaIdempotencyRecordRepository } from "../../src/platform/idempotency/infrastructure/persistence/prisma-idempotency-record.repository";
 import { RecordOutgoingEvent } from "../../src/platform/outbox/application/use-cases/record-outgoing-event";
 import { PrismaOutboxMessageRepository } from "../../src/platform/outbox/infrastructure/persistence/prisma-outbox-message.repository";
 import { PrismaAuditEventRepository } from "../../src/audit/infrastructure/persistence/prisma-audit-event.repository";
+import { GetApprovalFlowForRequest } from "../../src/approval/application/use-cases/get-approval-flow-for-request";
 import { MaterializeApprovalFlow } from "../../src/approval/application/use-cases/materialize-approval-flow";
 import { PrismaApprovalFlowRepository } from "../../src/approval/infrastructure/persistence/prisma-approval-flow.repository";
 import { PrismaPurchaseRequestRepository } from "../../src/procurement/infrastructure/persistence/prisma-purchase-request.repository";
+import { ReadPurchaseRequestSupplements } from "../../src/procurement/application/use-cases/read-purchase-request-supplements";
 import { SubmitOwnPurchaseRequest } from "../../src/procurement/application/use-cases/submit-own-purchase-request";
 import type { TrustedPrincipal } from "../../src/platform/tenancy/trusted-principal";
 import { createTenant, type TenantFixture } from "./identity-fixtures";
@@ -85,14 +89,28 @@ describe("approval workflow persistence (PostgreSQL)", () => {
     return draft.id;
   }
 
-  /** The real submission path: transition, flow and audit event in one transaction. */
+  /**
+   * The real submission path: the REL-004 reservation, the transition, the flow, the audit
+   * event and the outgoing intent, all in one transaction. Assembled by hand rather than
+   * resolved from the Nest container so a failing collaborator can be substituted for exactly
+   * one of them.
+   *
+   * `ReadPurchaseRequestSupplements` is constructed with no readers, which is the shape
+   * `procurement` has when quotation and ordering are not wired in — and is what makes those
+   * ports genuinely optional rather than optional in name.
+   */
   function submitter(auditRepository: AuditEventRepository) {
     return new SubmitOwnPurchaseRequest(
       purchaseRequests,
-      transactions,
       new MaterializeApprovalFlow(approvalFlows),
+      new GetApprovalFlowForRequest(approvalFlows),
+      new ReadPurchaseRequestSupplements(),
       new RecordAuditEvent(auditRepository),
       new RecordOutgoingEvent(new PrismaOutboxMessageRepository()),
+      new ExecuteIdempotently(
+        new PrismaIdempotencyRecordRepository(database),
+        transactions,
+      ),
     );
   }
 
@@ -104,9 +122,24 @@ describe("approval workflow persistence (PostgreSQL)", () => {
     const view = await submitter(auditEvents).execute(
       principalOf(tenant),
       draftId,
+      randomUUID(),
     );
 
     return view.request.id;
+  }
+
+  /** FR-035. The step the ladder is currently waiting on, whatever its responsibility. */
+  async function actionableStepId(purchaseRequestId: string): Promise<string> {
+    const step = await approvalFlows.findActionableStep({
+      organizationId: organizationA.organizationId,
+      purchaseRequestId,
+    });
+
+    if (step === null) {
+      throw new Error("Expected an actionable approval step");
+    }
+
+    return step.id;
   }
 
   describe("materialization", () => {
@@ -155,7 +188,11 @@ describe("approval workflow persistence (PostgreSQL)", () => {
       };
 
       await expect(
-        submitter(failing).execute(principalOf(organizationA), draftId),
+        submitter(failing).execute(
+          principalOf(organizationA),
+          draftId,
+          randomUUID(),
+        ),
       ).rejects.toThrow("audit storage is unavailable");
 
       // Neither half committed: no transition, no flow, no steps, no event.
@@ -168,6 +205,9 @@ describe("approval workflow persistence (PostgreSQL)", () => {
       await expect(database.approvalFlow.count()).resolves.toBe(0);
       await expect(database.approvalStep.count()).resolves.toBe(0);
       await expect(database.auditEvent.count()).resolves.toBe(0);
+      // REL-004: the reservation went with it, so a retry is not answered with a replay of a
+      // submission that never happened.
+      await expect(database.idempotencyRecord.count()).resolves.toBe(0);
     });
   });
 
@@ -177,6 +217,7 @@ describe("approval workflow persistence (PostgreSQL)", () => {
       const decision = {
         organizationId: organizationA.organizationId,
         purchaseRequestId,
+        approvalStepId: await actionableStepId(purchaseRequestId),
         role: "MANAGER" as const,
         decidedById: organizationA.userId,
       };

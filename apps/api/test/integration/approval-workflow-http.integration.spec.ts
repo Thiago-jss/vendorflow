@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseService } from "@vendorflow/database";
 import {
   ApiIntegrationTestHarness,
+  idempotencyHeaders,
   type HttpTestResponse,
 } from "./api-test-harness";
 import {
@@ -211,6 +212,7 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
 
     const { id } = created.body as { readonly id: string };
     const submitted = await api.post(`/purchase-requests/${id}/submit`, {
+      headers: idempotencyHeaders(),
       accessToken,
     });
     expect(submitted.status).toBe(200);
@@ -225,7 +227,7 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
   ): Promise<HttpTestResponse> {
     return api.post(
       `/purchase-requests/${purchaseRequestId}/approval-decision`,
-      { accessToken, body },
+      { headers: idempotencyHeaders(), accessToken, body },
     );
   }
 
@@ -243,6 +245,7 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
       for (const response of await Promise.all([
         api.get("/purchase-requests/awaiting-my-approval"),
         api.post(`/purchase-requests/${id}/approval-decision`, {
+          headers: idempotencyHeaders(),
           body: { decision: "APPROVED" },
         }),
       ])) {
@@ -275,7 +278,11 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
       const submitted = await submit(requesterToken, TIER_TWO_CENTS);
 
       expect(
-        submitted.approval?.steps.map((step) => [step.sequence, step.role, step.state]),
+        submitted.approval?.steps.map((step) => [
+          step.sequence,
+          step.role,
+          step.state,
+        ]),
       ).toEqual([
         [1, "MANAGER", "ACTIONABLE"],
         [2, "PURCHASING", "PENDING"],
@@ -286,7 +293,11 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
       const submitted = await submit(requesterToken, TIER_THREE_CENTS);
 
       expect(
-        submitted.approval?.steps.map((step) => [step.sequence, step.role, step.state]),
+        submitted.approval?.steps.map((step) => [
+          step.sequence,
+          step.role,
+          step.state,
+        ]),
       ).toEqual([
         [1, "MANAGER", "ACTIONABLE"],
         [2, "PURCHASING", "PENDING"],
@@ -443,7 +454,9 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
         { accessToken: managerToken },
       );
       const body = response.body as {
-        readonly items: readonly { readonly request: { readonly id: string } }[];
+        readonly items: readonly {
+          readonly request: { readonly id: string };
+        }[];
       };
 
       expect(body.items.map((item) => item.request.id)).toEqual([waiting.id]);
@@ -489,7 +502,9 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
         { accessToken: requestingManagerToken },
       );
       const body = response.body as {
-        readonly items: readonly { readonly request: { readonly id: string } }[];
+        readonly items: readonly {
+          readonly request: { readonly id: string };
+        }[];
       };
 
       expect(body.items.map((item) => item.request.id)).toEqual([
@@ -713,9 +728,10 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
         decidedById: manager.userId,
       });
       // The steps that will now never be decided are voided, not deleted (AUD-003).
-      expect(
-        body.approval?.steps.slice(1).map((step) => step.state),
-      ).toEqual(["VOIDED", "VOIDED"]);
+      expect(body.approval?.steps.slice(1).map((step) => step.state)).toEqual([
+        "VOIDED",
+        "VOIDED",
+      ]);
     });
 
     it("refuses a rejection with fewer than ten non-whitespace characters", async () => {
@@ -783,7 +799,7 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
       ]);
     });
 
-    it("cannot reach a Purchasing or Finance step through the manager route", async () => {
+    it("cannot reach a Purchasing or Finance step before a quote is selected", async () => {
       const submitted = await submit(requesterToken, TIER_THREE_CENTS);
       expect(
         (await decide(managerToken, submitted.id, { decision: "APPROVED" }))
@@ -791,11 +807,18 @@ describe("approval workflow HTTP surface (PostgreSQL)", () => {
       ).toBe(200);
 
       // The request is in IN_QUOTATION with a PENDING Purchasing step. Neither a buyer nor a
-      // manager can act on it: there is no actionable step of any decidable responsibility.
+      // manager can act on it, and both get the same answer: there is no *actionable* step, so
+      // the refusal is about the ladder's state rather than about who is asking.
+      //
+      // This is 409 for the buyer where an earlier phase answered 403, and the change is the
+      // point of BR-002: the route is no longer Manager-only, so a buyer is not refused for
+      // lacking a capability — they are refused because the rung they would act on is not
+      // waiting on anyone yet. BR-003's re-evaluation is what makes it actionable, and it runs
+      // when a quote is selected.
       expect(
         (await decide(buyerToken, submitted.id, { decision: "APPROVED" }))
           .status,
-      ).toBe(403);
+      ).toBe(409);
       expect(
         (await decide(managerToken, submitted.id, { decision: "APPROVED" }))
           .status,

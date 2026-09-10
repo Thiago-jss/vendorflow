@@ -59,12 +59,7 @@ export function materializeApprovalSteps(
  *
  * A rejection ends the flow: BR-004 makes it terminal, and the steps that will now never be
  * decided are voided rather than deleted. An approval that leaves no undecided step behind
- * completes the flow — that is the BR-001 first tier, whose only step is the Manager's.
- *
- * An approval that *does* leave steps behind keeps the flow `ACTIVE` and promotes nothing:
- * BR-002 evaluates the Purchasing and Finance steps against the **selected quote total**,
- * which does not exist until quotation. Promoting the next step here would mean asking a
- * buyer to approve an amount the requirements say is not the amount they approve.
+ * completes the flow.
  */
 export function approvalFlowStateAfterDecision(
   decision: ApprovalDecision,
@@ -75,6 +70,27 @@ export function approvalFlowStateAfterDecision(
   }
 
   return undecidedStepsRemaining === 0 ? "COMPLETED" : "ACTIVE";
+}
+
+/**
+ * FR-035/BR-002. Whether an approval hands the ladder on to its next rung immediately.
+ *
+ * A Manager approval does not. BR-002 evaluates the Purchasing and Finance steps against the
+ * **selected quote total**, which does not exist until a buyer selects a quote; promoting the
+ * next step here would ask a buyer to approve an amount the requirements say is not the amount
+ * they approve. Those steps become actionable through BR-003's re-evaluation instead.
+ *
+ * A Purchasing approval does, and so would a Finance one if anything followed it: by the time
+ * either is decided the amount is already the selected quote total, so the next rung is
+ * immediately meaningful.
+ *
+ * A rejection promotes nothing in either case — it voids what is left (BR-004).
+ */
+export function shouldPromoteNextStepAfterDecision(
+  role: ApprovalStepRole,
+  decision: ApprovalDecision,
+): boolean {
+  return decision === "APPROVED" && role !== "MANAGER";
 }
 
 /** The principal role FR-034 lets act on each step. A Purchasing step is a BUYER's. */

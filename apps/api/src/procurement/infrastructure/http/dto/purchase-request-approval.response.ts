@@ -13,7 +13,7 @@ import {
   type ApprovalFlowState,
   type ApprovalStepState,
 } from "../../../../approval/application/support/approval-step-state";
-import { formatCents } from "../../../application/support/purchase-request-money";
+import { formatCents } from "../../../../platform/numeric/centavos";
 
 /**
  * FR-026/FR-036. One rung of the ladder, decided or not.

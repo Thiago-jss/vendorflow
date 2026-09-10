@@ -1,11 +1,16 @@
 import {
-  APPROVAL_DECIDABLE_STATUSES,
   EDITABLE_BY_REQUESTER_STATUSES,
+  MANAGER_DECIDABLE_STATUSES,
   NON_CANCELLABLE_STATUSES,
+  ORDERABLE_STATUSES,
+  POST_QUOTATION_DECIDABLE_STATUSES,
+  QUOTABLE_STATUSES,
   REQUESTER_CANCELLABLE_STATUSES,
   SUBMITTABLE_STATUSES,
   isApprovalTransitionAllowed,
   isEditableByRequester,
+  isOrderingTransitionAllowed,
+  isQuoteSelectionTransitionAllowed,
   isRequesterTransitionAllowed,
   purchaseRequestStatuses,
   type PurchaseRequestStatus,
@@ -25,24 +30,26 @@ describe("purchase request state machine", () => {
     ]);
   });
 
-  it("allows exactly the four requester transitions this phase implements", () => {
+  it("allows exactly the requester transitions FR-025 and BR-013 describe", () => {
     const allowed = purchaseRequestStatuses.flatMap((from) =>
       purchaseRequestStatuses
         .filter((to) => isRequesterTransitionAllowed(from, to))
         .map((to) => `${from} -> ${to}`),
     );
 
-    // IN_QUOTATION -> CANCELLED joins the list in this phase because a Manager approval can
-    // now put a request in IN_QUOTATION. FR-025 did not change; the reachable states did.
+    // IN_FINAL_APPROVAL and APPROVED join the list in this phase because quote selection can
+    // now put a request there. FR-025 did not change; the reachable states did.
     expect(allowed).toEqual([
       "DRAFT -> SUBMITTED",
       "DRAFT -> CANCELLED",
       "SUBMITTED -> CANCELLED",
       "IN_QUOTATION -> CANCELLED",
+      "IN_FINAL_APPROVAL -> CANCELLED",
+      "APPROVED -> CANCELLED",
     ]);
   });
 
-  it("allows exactly the two approval transitions this phase implements", () => {
+  it("allows exactly the approval transitions FR-032 and FR-034 describe", () => {
     const allowed = purchaseRequestStatuses.flatMap((from) =>
       purchaseRequestStatuses
         .filter((to) => isApprovalTransitionAllowed(from, to))
@@ -52,30 +59,63 @@ describe("purchase request state machine", () => {
     expect(allowed).toEqual([
       "SUBMITTED -> IN_QUOTATION",
       "SUBMITTED -> REJECTED",
+      "IN_FINAL_APPROVAL -> APPROVED",
+      "IN_FINAL_APPROVAL -> REJECTED",
     ]);
-    expect(APPROVAL_DECIDABLE_STATUSES).toEqual(["SUBMITTED"]);
+    expect(MANAGER_DECIDABLE_STATUSES).toEqual(["SUBMITTED"]);
+    expect(POST_QUOTATION_DECIDABLE_STATUSES).toEqual(["IN_FINAL_APPROVAL"]);
   });
 
-  it("keeps the two tables separate: neither actor drives the other's edges", () => {
-    // A requester never approves their way out of SUBMITTED, and a decision never submits,
-    // cancels or edits. Conflating the tables is how a role check comes to stand in for a
-    // state check (AUTHZ-005).
+  it("lets only a quote selection leave IN_QUOTATION towards approval (FR-045)", () => {
+    const allowed = purchaseRequestStatuses.flatMap((from) =>
+      purchaseRequestStatuses
+        .filter((to) => isQuoteSelectionTransitionAllowed(from, to))
+        .map((to) => `${from} -> ${to}`),
+    );
+
+    expect(allowed).toEqual([
+      "IN_QUOTATION -> IN_FINAL_APPROVAL",
+      "IN_QUOTATION -> APPROVED",
+    ]);
+    expect(QUOTABLE_STATUSES).toEqual(["IN_QUOTATION"]);
+    // A selection can never reach ORDERED or REJECTED: those are somebody else's edges.
+    expect(isQuoteSelectionTransitionAllowed("IN_QUOTATION", "ORDERED")).toBe(
+      false,
+    );
+    expect(isQuoteSelectionTransitionAllowed("IN_QUOTATION", "REJECTED")).toBe(
+      false,
+    );
+  });
+
+  it("lets only a purchase order issuance reach ORDERED (FR-052)", () => {
+    const allowed = purchaseRequestStatuses.flatMap((from) =>
+      purchaseRequestStatuses
+        .filter((to) => isOrderingTransitionAllowed(from, to))
+        .map((to) => `${from} -> ${to}`),
+    );
+
+    expect(allowed).toEqual(["APPROVED -> ORDERED"]);
+    expect(ORDERABLE_STATUSES).toEqual(["APPROVED"]);
+    expect(isOrderingTransitionAllowed("IN_FINAL_APPROVAL", "ORDERED")).toBe(
+      false,
+    );
+  });
+
+  it("keeps the tables separate: no actor drives another's edges", () => {
+    // Conflating them is how a role check comes to stand in for a state check (AUTHZ-005).
     expect(isRequesterTransitionAllowed("SUBMITTED", "IN_QUOTATION")).toBe(false);
     expect(isRequesterTransitionAllowed("SUBMITTED", "REJECTED")).toBe(false);
+    expect(isRequesterTransitionAllowed("APPROVED", "ORDERED")).toBe(false);
     expect(isApprovalTransitionAllowed("DRAFT", "SUBMITTED")).toBe(false);
     expect(isApprovalTransitionAllowed("SUBMITTED", "CANCELLED")).toBe(false);
     expect(isApprovalTransitionAllowed("IN_QUOTATION", "REJECTED")).toBe(false);
-  });
-
-  it("refuses every other transition, including the ones later phases will add", () => {
-    // BR-011 permits these; the actors that drive them do not exist yet, so neither state
-    // machine must pretend it can.
-    expect(isRequesterTransitionAllowed("IN_QUOTATION", "APPROVED")).toBe(false);
-    expect(isRequesterTransitionAllowed("APPROVED", "ORDERED")).toBe(false);
-    expect(isApprovalTransitionAllowed("IN_FINAL_APPROVAL", "APPROVED")).toBe(
+    // A decision never selects a quote's outcome for it, and a selection never approves.
+    expect(isApprovalTransitionAllowed("IN_QUOTATION", "APPROVED")).toBe(false);
+    expect(isApprovalTransitionAllowed("APPROVED", "ORDERED")).toBe(false);
+    expect(isQuoteSelectionTransitionAllowed("SUBMITTED", "IN_FINAL_APPROVAL")).toBe(
       false,
     );
-    expect(isApprovalTransitionAllowed("APPROVED", "ORDERED")).toBe(false);
+    expect(isOrderingTransitionAllowed("IN_QUOTATION", "ORDERED")).toBe(false);
   });
 
   it("refuses to leave a terminal state", () => {
@@ -89,6 +129,8 @@ describe("purchase request state machine", () => {
       for (const to of purchaseRequestStatuses) {
         expect(isRequesterTransitionAllowed(from, to)).toBe(false);
         expect(isApprovalTransitionAllowed(from, to)).toBe(false);
+        expect(isQuoteSelectionTransitionAllowed(from, to)).toBe(false);
+        expect(isOrderingTransitionAllowed(from, to)).toBe(false);
       }
     }
   });
@@ -100,12 +142,14 @@ describe("purchase request state machine", () => {
     }
   });
 
-  it("permits submission only from DRAFT and cancellation from every reachable state", () => {
+  it("permits submission only from DRAFT and cancellation from every state before ORDERED", () => {
     expect(SUBMITTABLE_STATUSES).toEqual(["DRAFT"]);
     expect(REQUESTER_CANCELLABLE_STATUSES).toEqual([
       "DRAFT",
       "SUBMITTED",
       "IN_QUOTATION",
+      "IN_FINAL_APPROVAL",
+      "APPROVED",
     ]);
   });
 
