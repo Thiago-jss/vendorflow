@@ -1,11 +1,5 @@
-import { applicationName } from "@/lib/application";
+import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  return (
-    <main>
-      <p className="eyebrow">Platform bootstrap</p>
-      <h1>{applicationName}</h1>
-      <p>The application shell is running. Product workflows will be introduced in subsequent issues.</p>
-    </main>
-  );
+  redirect("/requests");
 }
