@@ -1,4 +1,8 @@
-import type { PurchaseRequestStatus } from "./contracts";
+import type {
+  ApprovalStepRole,
+  ApprovalStepState,
+  PurchaseRequestStatus
+} from "./contracts";
 
 /**
  * Display formatting for values the system keeps exactly.
@@ -90,4 +94,33 @@ const STATUS_LABELS: Readonly<Record<PurchaseRequestStatus, string>> = {
 /** The status the API reported, in words. The label never decides what may be done. */
 export function statusLabel(status: PurchaseRequestStatus): string {
   return STATUS_LABELS[status] ?? status;
+}
+
+const APPROVAL_STEP_ROLE_LABELS: Readonly<Record<ApprovalStepRole, string>> = {
+  MANAGER: "Gestor",
+  PURCHASING: "Compras",
+  FINANCE: "Financeiro"
+};
+
+/**
+ * The responsibility a rung of the ladder belongs to, in words.
+ *
+ * It is a step role and not a principal's role: a Purchasing step is decided by a BUYER, and
+ * the two vocabularies meet only on the server.
+ */
+export function approvalStepRoleLabel(role: ApprovalStepRole): string {
+  return APPROVAL_STEP_ROLE_LABELS[role] ?? role;
+}
+
+const APPROVAL_STEP_STATE_LABELS: Readonly<Record<ApprovalStepState, string>> = {
+  PENDING: "Aguardando etapas anteriores",
+  ACTIONABLE: "Aguardando decisão",
+  APPROVED: "Aprovada",
+  REJECTED: "Rejeitada",
+  VOIDED: "Sem efeito"
+};
+
+/** The state the API reported for a rung. Never inferred from timestamps. */
+export function approvalStepStateLabel(state: ApprovalStepState): string {
+  return APPROVAL_STEP_STATE_LABELS[state] ?? state;
 }

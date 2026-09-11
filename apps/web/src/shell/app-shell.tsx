@@ -9,9 +9,12 @@ import { useSession } from "@/session/session-context";
  * The authenticated chrome: where the user is, what they can open, and how to leave.
  *
  * The navigation is built from the roles `GET /me/organization` reported, and that is a
- * presentation decision only — a link that is absent is not a permission that is enforced.
- * Only routes this slice actually implements appear; approvals, suppliers, quotations and
- * purchase orders are not linked because they do not exist yet.
+ * presentation decision only — a link that is absent is not a permission that is enforced,
+ * and a link that is present grants nothing: the API refuses the approval queue to anyone
+ * who does not hold MANAGER, whatever this shell chose to render.
+ *
+ * Only routes that are actually implemented appear; suppliers, quotations, purchase orders
+ * and the post-quotation approvals are not linked because they do not exist yet.
  */
 export function AppShell({ children }: { readonly children: ReactNode }) {
   const { context, signOut } = useSession();
@@ -23,6 +26,7 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
 
   const { organization, membership } = context;
   const showRequests = hasRole(context, "EMPLOYEE");
+  const showApprovals = hasRole(context, "MANAGER");
 
   return (
     <div className="shell">
@@ -39,6 +43,11 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
             {showRequests ? (
               <li>
                 <Link href="/requests">Minhas solicitações</Link>
+              </li>
+            ) : null}
+            {showApprovals ? (
+              <li>
+                <Link href="/approvals">Aprovações pendentes</Link>
               </li>
             ) : null}
           </ul>

@@ -17,6 +17,8 @@ import type {
   PurchaseRequestStatus
 } from "./contracts";
 import {
+  approvalStepRoleLabel,
+  approvalStepStateLabel,
   formatCalendarDate,
   formatCents,
   formatQuantity,
@@ -25,30 +27,6 @@ import {
 } from "./formatting";
 import { createIdempotencyKeyStore, submissionFingerprint } from "./idempotency";
 import { StatusBadge } from "./status-badge";
-
-/**
- * One request, as the API describes it.
- *
- * Every value shown here is the server's: the status, the estimated total, each line total,
- * the approval ladder, and the two supplements that are null until quotation and ordering
- * produce them. The page recomputes none of it.
- *
- * The two actions are affordances. Whether a draft may be submitted and whether a request may
- * be cancelled are decided by the API, and its refusal is rendered rather than pre-empted.
- */
-const APPROVAL_STEP_ROLE_LABELS: Readonly<Record<string, string>> = {
-  MANAGER: "Gestor",
-  PURCHASING: "Compras",
-  FINANCE: "Financeiro"
-};
-
-const APPROVAL_STEP_STATE_LABELS: Readonly<Record<string, string>> = {
-  PENDING: "Aguardando etapas anteriores",
-  ACTIONABLE: "Aguardando decisão",
-  APPROVED: "Aprovada",
-  REJECTED: "Rejeitada",
-  VOIDED: "Sem efeito"
-};
 
 /**
  * Presentation only. The states from which the API accepts a cancellation, named so the page
@@ -76,6 +54,16 @@ function isRetryableSubmission(failure: ApiFailure): boolean {
   );
 }
 
+/**
+ * One request, as the API describes it.
+ *
+ * Every value shown here is the server's: the status, the estimated total, each line total,
+ * the approval ladder, and the two supplements that are null until quotation and ordering
+ * produce them. The page recomputes none of it.
+ *
+ * The two actions are affordances. Whether a draft may be submitted and whether a request may
+ * be cancelled are decided by the API, and its refusal is rendered rather than pre-empted.
+ */
 export function RequestDetail({
   purchaseRequestId
 }: {
@@ -181,7 +169,7 @@ export function RequestDetail({
     // honest personalization is "you".
     return step.decidedById === context?.membership.userId
       ? "Você"
-      : `Responsável por ${APPROVAL_STEP_ROLE_LABELS[step.role] ?? step.role}`;
+      : `Responsável por ${approvalStepRoleLabel(step.role)}`;
   }
 
   return (
@@ -285,12 +273,12 @@ export function RequestDetail({
             {request.approval.steps.map((step) => (
               <li key={step.id}>
                 <p className="approval-step-title">
-                  {`Etapa ${step.sequence} — ${APPROVAL_STEP_ROLE_LABELS[step.role] ?? step.role}`}
+                  {`Etapa ${step.sequence} — ${approvalStepRoleLabel(step.role)}`}
                 </p>
                 <dl className="definition-grid">
                   <div>
                     <dt>Situação</dt>
-                    <dd>{APPROVAL_STEP_STATE_LABELS[step.state] ?? step.state}</dd>
+                    <dd>{approvalStepStateLabel(step.state)}</dd>
                   </div>
                   <div>
                     <dt>Valor avaliado</dt>

@@ -309,6 +309,14 @@ textarea[aria-invalid="true"] {
   font-size: 0.9375rem;
 }
 
+.notice {
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--accent);
+  border-radius: 0.25rem;
+  background: var(--ok-surface);
+  font-weight: 600;
+}
+
 .loading,
 .empty-state {
   padding: 1.25rem;
@@ -355,6 +363,23 @@ textarea[aria-invalid="true"] {
 .list {
   display: grid;
   gap: 1rem;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* The rung and its state read as two lines, so neither depends on the other's colour. */
+.step-cell {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.step-cell-state {
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
 }
 
 /* Status */
@@ -461,10 +486,18 @@ textarea[aria-invalid="true"] {
 
 .dialog {
   width: min(32rem, 100%);
+  /* A decision dialog carries a reason field and may carry an alert: it has to scroll on a
+     short screen rather than push its own buttons out of reach. */
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   padding: 1.25rem;
   border: 1px solid var(--line);
   border-radius: 0.5rem;
   background: var(--surface);
+}
+
+.dialog .definition-grid {
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
 }
 
 @media (max-width: 40rem) {

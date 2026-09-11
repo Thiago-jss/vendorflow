@@ -14,6 +14,11 @@ export interface ConfirmDialogProps {
   readonly title: string;
   readonly children: ReactNode;
   readonly confirmLabel: string;
+  /**
+   * Decoration only, and never the thing that says what the button does: the label carries
+   * that. It exists so an approval is not painted in the colour of a destructive action.
+   */
+  readonly confirmTone?: "danger" | "primary";
   readonly cancelLabel?: string;
   readonly busy?: boolean;
   readonly onConfirm: () => void;
@@ -27,6 +32,7 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel,
+  confirmTone = "danger",
   cancelLabel = "Voltar",
   busy = false,
   onConfirm,
@@ -104,7 +110,7 @@ export function ConfirmDialog({
           </button>
           <button
             type="button"
-            className="button button-danger"
+            className={`button button-${confirmTone}`}
             onClick={onConfirm}
             disabled={busy}
           >
