@@ -13,8 +13,8 @@ import { useSession } from "@/session/session-context";
  * and a link that is present grants nothing: the API refuses the approval queue to anyone
  * who does not hold MANAGER, whatever this shell chose to render.
  *
- * Only routes that are actually implemented appear; suppliers, quotations, purchase orders
- * and the post-quotation approvals are not linked because they do not exist yet.
+ * Only routes that are actually implemented appear; quotations, purchase orders and the
+ * post-quotation approvals are not linked because they do not exist yet.
  */
 export function AppShell({ children }: { readonly children: ReactNode }) {
   const { context, signOut } = useSession();
@@ -27,6 +27,7 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
   const { organization, membership } = context;
   const showRequests = hasRole(context, "EMPLOYEE");
   const showApprovals = hasRole(context, "MANAGER");
+  const showSuppliers = hasRole(context, "BUYER") || hasRole(context, "ADMIN");
 
   return (
     <div className="shell">
@@ -48,6 +49,11 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
             {showApprovals ? (
               <li>
                 <Link href="/approvals">Aprovações pendentes</Link>
+              </li>
+            ) : null}
+            {showSuppliers ? (
+              <li>
+                <Link href="/suppliers">Fornecedores</Link>
               </li>
             ) : null}
           </ul>

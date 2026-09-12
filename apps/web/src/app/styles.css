@@ -411,6 +411,14 @@ textarea[aria-invalid="true"] {
   background: var(--danger-surface);
 }
 
+.status-badge[data-status="ACTIVE"] {
+  background: var(--ok-surface);
+}
+
+.status-badge[data-status="INACTIVE"] {
+  background: var(--neutral-surface);
+}
+
 /* Detail */
 
 .detail {

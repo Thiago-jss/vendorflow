@@ -58,4 +58,28 @@ describe("authenticated shell navigation", () => {
 
     expect(screen.queryByRole("link", { name: "Aprovações pendentes" })).toBeNull();
   });
+
+  it("links the supplier registry for a buyer", async () => {
+    renderShellFor(["BUYER"]);
+
+    const link = await screen.findByRole("link", { name: "Fornecedores" });
+
+    expect(link.getAttribute("href")).toBe("/suppliers");
+  });
+
+  it("links the supplier registry for an admin", async () => {
+    renderShellFor(["ADMIN"]);
+
+    const link = await screen.findByRole("link", { name: "Fornecedores" });
+
+    expect(link.getAttribute("href")).toBe("/suppliers");
+  });
+
+  it("offers no supplier link to a membership with neither buyer nor admin", async () => {
+    renderShellFor(["EMPLOYEE", "MANAGER"]);
+
+    await screen.findByRole("link", { name: "Minhas solicitações" });
+
+    expect(screen.queryByRole("link", { name: "Fornecedores" })).toBeNull();
+  });
 });
