@@ -24,6 +24,7 @@ import { DecidePurchaseRequestApproval } from "./application/use-cases/decide-pu
 import { DeleteOwnPurchaseRequestDraft } from "./application/use-cases/delete-own-purchase-request-draft";
 import { GetOrganizationPurchaseRequest } from "./application/use-cases/get-organization-purchase-request";
 import { GetOwnPurchaseRequest } from "./application/use-cases/get-own-purchase-request";
+import { GetQuotationWorkPurchaseRequest } from "./application/use-cases/get-quotation-work-purchase-request";
 import { ListDepartmentApprovalQueue } from "./application/use-cases/list-department-approval-queue";
 import { ListOwnPurchaseRequests } from "./application/use-cases/list-own-purchase-requests";
 import { ListQuotationQueue } from "./application/use-cases/list-quotation-queue";
@@ -99,6 +100,7 @@ import { PurchaseRequestsController } from "./infrastructure/http/controllers/pu
     DeleteOwnPurchaseRequestDraft,
     ListDepartmentApprovalQueue,
     ListQuotationQueue,
+    GetQuotationWorkPurchaseRequest,
     DecidePurchaseRequestApproval,
     GetOrganizationPurchaseRequest,
     ProvePurchaseRequestQuotable,

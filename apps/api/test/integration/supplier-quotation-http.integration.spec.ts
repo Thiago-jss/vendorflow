@@ -12,6 +12,7 @@ import {
   type UserFixture,
 } from "./identity-fixtures";
 import { PostgreSqlIntegrationTestHarness } from "./postgresql-test-harness";
+import { createPurchaseRequest } from "./quotation-fixtures";
 
 /** A real CNPJ, punctuated, and the 14 digits it normalizes to. */
 const CNPJ = "11.222.333/0001-81";
@@ -334,6 +335,7 @@ describe("supplier, quotation and ordering HTTP surface (PostgreSQL)", () => {
         api.get(`/suppliers/${id}`),
         api.post(`/suppliers/${id}/deactivate`),
         api.get("/purchase-requests/awaiting-quotation"),
+        api.get(`/purchase-requests/awaiting-quotation/${id}`),
         api.get(`/purchase-requests/${id}/quotes`),
         api.post(`/purchase-requests/${id}/quotes`, { body: {} }),
         api.post(`/purchase-requests/${id}/quotes/${id}/withdraw`),
@@ -1172,6 +1174,283 @@ describe("supplier, quotation and ordering HTTP surface (PostgreSQL)", () => {
     });
   });
 
+  describe("FR-040/FR-041 the Buyer's quotation-work read", () => {
+    const WORK_KEYS = ["id", "items", "neededBy"];
+    const WORK_ITEM_KEYS = [
+      "description",
+      "id",
+      "position",
+      "quantity",
+      "unitOfMeasure",
+    ];
+    /** Everything the requester's own read carries that pricing a request does not need. */
+    const EXCLUDED_KEYS = [
+      "status",
+      "justification",
+      "requesterId",
+      "departmentId",
+      "organizationId",
+      "estimatedUnitPriceCents",
+      "estimatedLineTotalCents",
+      "estimatedTotalCents",
+      "approval",
+      "selectedQuote",
+      "purchaseOrder",
+      "createdAt",
+      "updatedAt",
+      "submittedAt",
+      "cancelledAt",
+      "itemCount",
+    ];
+
+    interface QuotationWorkBody {
+      readonly id: string;
+      readonly neededBy: string;
+      readonly items: readonly {
+        readonly id: string;
+        readonly position: number;
+        readonly description: string;
+        readonly unitOfMeasure: string;
+        readonly quantity: string;
+      }[];
+    }
+
+    function readWork(id: string, accessToken = buyerToken) {
+      return api.get(`/purchase-requests/awaiting-quotation/${id}`, {
+        accessToken,
+      });
+    }
+
+    /** Two lines, one of them fractional, driven into IN_QUOTATION through the real routes. */
+    async function twoLineRequestInQuotation(
+      accessToken = requesterToken,
+    ): Promise<RequestBody> {
+      const created = await api.post("/purchase-requests", {
+        accessToken,
+        body: {
+          justification: "Replacement laptops for the onboarding cohort",
+          neededBy: "2026-11-30",
+          items: [
+            {
+              description: "Laptop, 16 GB RAM",
+              unitOfMeasure: "UN",
+              quantity: "4",
+              estimatedUnitPriceCents: "549900",
+            },
+            {
+              description: "Copper cable",
+              unitOfMeasure: "M",
+              quantity: "1.25",
+              estimatedUnitPriceCents: "1999",
+            },
+          ],
+        },
+      });
+      expect(created.status).toBe(201);
+
+      const { id } = created.body as { readonly id: string };
+      expect(
+        (await api.post(`/purchase-requests/${id}/submit`, {
+          accessToken,
+          headers: idempotencyHeaders(),
+        })).status,
+      ).toBe(200);
+
+      const approved = await api.post(
+        `/purchase-requests/${id}/approval-decision`,
+        {
+          accessToken: managerToken,
+          headers: idempotencyHeaders(),
+          body: { decision: "APPROVED" },
+        },
+      );
+      expect(approved.status).toBe(200);
+
+      return approved.body as RequestBody;
+    }
+
+    it("returns exactly the closed contract a quote needs, items in position order", async () => {
+      const request = await twoLineRequestInQuotation();
+
+      const response = await readWork(request.id);
+
+      expect(response.status).toBe(200);
+      const body = response.body as QuotationWorkBody &
+        Record<string, unknown>;
+      expect(Object.keys(body).sort()).toEqual(WORK_KEYS);
+      expect(body).toEqual({
+        id: request.id,
+        neededBy: "2026-11-30",
+        items: [
+          {
+            id: request.items[0]?.id,
+            position: 1,
+            description: "Laptop, 16 GB RAM",
+            unitOfMeasure: "UN",
+            quantity: "4.000",
+          },
+          {
+            id: request.items[1]?.id,
+            position: 2,
+            description: "Copper cable",
+            unitOfMeasure: "M",
+            quantity: "1.250",
+          },
+        ],
+      });
+
+      for (const item of body.items) {
+        expect(Object.keys(item).sort()).toEqual(WORK_ITEM_KEYS);
+        // Exact decimal text, never a JSON number (BR-031).
+        expect(typeof item.quantity).toBe("string");
+      }
+
+      for (const excluded of EXCLUDED_KEYS) {
+        expect(Object.keys(body)).not.toContain(excluded);
+        for (const item of body.items) {
+          expect(Object.keys(item)).not.toContain(excluded);
+        }
+      }
+
+      // Nothing the requester wrote in the justification travels in this response.
+      expect(response.rawBody).not.toContain("onboarding cohort");
+    });
+
+    it("gives the first quote the item identifiers it must price", async () => {
+      const supplierId = await registerSupplier();
+      const request = await twoLineRequestInQuotation();
+
+      // No quote exists yet, so the comparison cannot be where the identifiers come from.
+      const comparison = await api.get(`/purchase-requests/${request.id}/quotes`, {
+        accessToken: buyerToken,
+      });
+      expect(comparison.status).toBe(200);
+      expect((comparison.body as { readonly items: readonly unknown[] }).items).toEqual([]);
+
+      const work = (await readWork(request.id)).body as QuotationWorkBody;
+
+      const registered = await api.post(
+        `/purchase-requests/${work.id}/quotes`,
+        {
+          accessToken: buyerToken,
+          body: {
+            supplierId,
+            freightCents: "0",
+            discountCents: "0",
+            validUntil: "2026-12-31",
+            deliveryLeadTimeDays: 15,
+            lines: work.items.map((item) => ({
+              purchaseRequestItemId: item.id,
+              unitPriceCents: "90000",
+            })),
+          },
+        },
+      );
+
+      expect(registered.status).toBe(201);
+      const quote = registered.body as QuoteBody;
+      expect(
+        quote.items.map((line) => [line.purchaseRequestItemId, line.quantity]),
+      ).toEqual(work.items.map((item) => [item.id, item.quantity]));
+    });
+
+    it("refuses every role but BUYER with the capability denial, whether or not the request exists", async () => {
+      const request = await twoLineRequestInQuotation();
+
+      for (const token of [
+        requesterToken,
+        plainEmployeeToken,
+        managerToken,
+        financeToken,
+        administratorToken,
+      ]) {
+        const existing = await readWork(request.id, token);
+        const unknown = await readWork(randomUUID(), token);
+
+        expect(existing.status).toBe(403);
+        // The refusal names no resource, so it cannot be used to probe for one.
+        expect(existing.body).toEqual(unknown.body);
+      }
+    });
+
+    it("answers unknown, cross-tenant and non-quotable requests with one bare 404", async () => {
+      const inQuotation = await twoLineRequestInQuotation();
+      const foreign = await createPurchaseRequest(database, foreignBuyer, {
+        status: "IN_QUOTATION",
+      });
+      const nonQuotable = await Promise.all(
+        (
+          [
+            "DRAFT",
+            "SUBMITTED",
+            "IN_FINAL_APPROVAL",
+            "APPROVED",
+            "ORDERED",
+            "REJECTED",
+            "CANCELLED",
+          ] as const
+        ).map((status) =>
+          createPurchaseRequest(database, requester, { status }),
+        ),
+      );
+
+      const responses = [
+        await readWork(randomUUID()),
+        // Organization A's buyer against organization B's request, and the reverse.
+        await readWork(foreign.purchaseRequestId),
+        await readWork(inQuotation.id, foreignBuyerToken),
+        ...(await Promise.all(
+          nonQuotable.map((fixture) => readWork(fixture.purchaseRequestId)),
+        )),
+      ];
+
+      for (const response of responses) {
+        expect(response.status).toBe(404);
+        expect(response.body).toEqual({ statusCode: 404, message: "Not Found" });
+      }
+    });
+
+    it("stops answering once a selection moves the request out of quotation", async () => {
+      const supplierId = await registerSupplier();
+      const request = await requestInQuotation();
+      const quote = await registerQuote(request, supplierId);
+
+      expect((await readWork(request.id)).status).toBe(200);
+      expect((await selectQuote(request, quote)).status).toBe(200);
+
+      const after = await readWork(request.id);
+      expect(after.status).toBe(404);
+      expect(after.body).toEqual({ statusCode: 404, message: "Not Found" });
+    });
+
+    it("lets a Buyer read quotation work on a request they raised (BR-005)", async () => {
+      const buyingRequester = await createUser(database, {
+        organizationId: requester.organizationId,
+        branchId: requester.branchId,
+        departmentId: requester.departmentId,
+        suffix: "BuyingRequester",
+        roles: ["EMPLOYEE", "BUYER"],
+      });
+      const token = await login(buyingRequester);
+      const request = await twoLineRequestInQuotation(token);
+
+      const response = await readWork(request.id, token);
+
+      expect(response.status).toBe(200);
+      expect((response.body as QuotationWorkBody).id).toBe(request.id);
+    });
+
+    it("refuses an identifier that is not a version 4 UUID with 400", async () => {
+      for (const identifier of [
+        "not-a-uuid",
+        // A well-formed version 1 UUID.
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      ]) {
+        expect((await readWork(identifier)).status).toBe(400);
+      }
+    });
+  });
+
   describe("the authorization matrix", () => {
     it("gives quotation to BUYER alone, ADMIN included in the refusal", async () => {
       const supplierId = await registerSupplier();
@@ -1615,6 +1894,7 @@ describe("supplier, quotation and ordering HTTP surface (PostgreSQL)", () => {
         "/suppliers/{supplierId}",
         "/suppliers/{supplierId}/deactivate",
         "/purchase-requests/awaiting-quotation",
+        "/purchase-requests/awaiting-quotation/{purchaseRequestId}",
         "/purchase-requests/{purchaseRequestId}/quotes",
         "/purchase-requests/{purchaseRequestId}/quotes/{supplierQuoteId}/withdraw",
         "/purchase-requests/{purchaseRequestId}/quotes/{supplierQuoteId}/select",

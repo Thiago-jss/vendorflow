@@ -23,6 +23,8 @@ import type {
   PurchaseRequestRecord,
   PurchaseRequestRepository,
   PurchaseRequestSummaryRecord,
+  QuotationWorkPurchaseRequestCriteria,
+  QuotationWorkPurchaseRequestRecord,
   ReplacePurchaseRequestDraftInput,
   SubmitPurchaseRequestInput,
 } from "../../application/contracts/purchase-request.repository";
@@ -69,6 +71,26 @@ const SUMMARY_SELECTION = {
   createdAt: true,
   updatedAt: true,
   _count: { select: { items: true } },
+} satisfies Prisma.PurchaseRequestSelect;
+
+/**
+ * FR-040/FR-041. Only what pricing a request's items needs. Everything else on the row — the
+ * justification, the estimates, the requester and the department — is left in the database
+ * rather than loaded and dropped later.
+ */
+const QUOTATION_WORK_SELECTION = {
+  id: true,
+  neededBy: true,
+  items: {
+    orderBy: { position: "asc" },
+    select: {
+      id: true,
+      position: true,
+      description: true,
+      unitOfMeasure: true,
+      quantity: true,
+    },
+  },
 } satisfies Prisma.PurchaseRequestSelect;
 
 type PurchaseRequestRow = Prisma.PurchaseRequestGetPayload<{
@@ -173,6 +195,38 @@ export class PrismaPurchaseRequestRepository
     });
 
     return request === null ? null : toRecord(request);
+  }
+
+  async findQuotationWorkRequest(
+    criteria: QuotationWorkPurchaseRequestCriteria,
+  ): Promise<QuotationWorkPurchaseRequestRecord | null> {
+    // Tenant, resource and permitted states are all in one predicate. A request of another
+    // organization, or one that is not awaiting quotation, is never loaded and answers exactly
+    // as an unknown identifier does (MT-004).
+    const request = await this.database.purchaseRequest.findUnique({
+      where: {
+        organizationId_id: {
+          organizationId: criteria.organizationId,
+          id: criteria.purchaseRequestId,
+        },
+        status: { in: criteria.statuses.map(toPurchaseRequestStatus) },
+      },
+      select: QUOTATION_WORK_SELECTION,
+    });
+
+    return request === null
+      ? null
+      : {
+          id: request.id,
+          neededBy: request.neededBy,
+          items: request.items.map((item) => ({
+            id: item.id,
+            position: item.position,
+            description: item.description,
+            unitOfMeasure: item.unitOfMeasure,
+            quantityScaled: toScaledQuantity(item.quantity),
+          })),
+        };
   }
 
   async listOwnRequests(

@@ -122,6 +122,7 @@ describe("generated OpenAPI document", () => {
       "GET /purchase-requests",
       "GET /purchase-requests/awaiting-my-approval",
       "GET /purchase-requests/awaiting-quotation",
+      "GET /purchase-requests/awaiting-quotation/{purchaseRequestId}",
       "GET /purchase-requests/{purchaseRequestId}",
       "GET /purchase-requests/{purchaseRequestId}/quotes",
       "POST /purchase-requests",
@@ -344,6 +345,75 @@ describe("generated OpenAPI document", () => {
     expect(item.properties?.pendingStep?.$ref).toBe(
       "#/components/schemas/ApprovalStepResponse",
     );
+  });
+
+  it("documents the Buyer's quotation-work read as a closed, minimal contract (FR-040/FR-041)", () => {
+    const read = operation(
+      "/purchase-requests/awaiting-quotation/{purchaseRequestId}",
+      "get",
+    );
+
+    expect(read.tags).toContain("purchase-requests");
+    expect(read.responses["200"]?.content?.["application/json"]?.schema.$ref).toBe(
+      "#/components/schemas/PurchaseRequestQuotationWorkResponse",
+    );
+    expect(Object.keys(read.responses).sort()).toEqual([
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+    ]);
+    expect(read.responses["404"]?.description).toContain("indistinguishable");
+    // The identifier is the only input; nothing in the query can widen tenant, requester,
+    // department or lifecycle scope.
+    expect(
+      (read.parameters ?? []).map((parameter) => `${parameter.in}:${parameter.name}`),
+    ).toEqual(["path:purchaseRequestId"]);
+
+    const response = schema("PurchaseRequestQuotationWorkResponse");
+    expect(Object.keys(response.properties ?? {}).sort()).toEqual([
+      "id",
+      "items",
+      "neededBy",
+    ]);
+    expect(response.properties?.neededBy?.format).toBe("date");
+    expect(response.properties?.items?.items?.$ref).toBe(
+      "#/components/schemas/PurchaseRequestQuotationWorkItemResponse",
+    );
+
+    const item = schema("PurchaseRequestQuotationWorkItemResponse");
+    expect(Object.keys(item.properties ?? {}).sort()).toEqual([
+      "description",
+      "id",
+      "position",
+      "quantity",
+      "unitOfMeasure",
+    ]);
+    expect(item.properties?.quantity?.type).toBe("string");
+    expect(item.properties?.id?.format).toBe("uuid");
+
+    for (const excluded of [
+      "status",
+      "justification",
+      "requesterId",
+      "departmentId",
+      "organizationId",
+      "estimatedUnitPriceCents",
+      "estimatedLineTotalCents",
+      "estimatedTotalCents",
+      "approval",
+      "selectedQuote",
+      "purchaseOrder",
+      "createdAt",
+      "updatedAt",
+      "submittedAt",
+      "cancelledAt",
+      "itemCount",
+    ]) {
+      expect(Object.keys(response.properties ?? {})).not.toContain(excluded);
+      expect(Object.keys(item.properties ?? {})).not.toContain(excluded);
+    }
   });
 
   it("documents the quote comparison as a bounded keyset page (FR-043, NFR-004)", () => {

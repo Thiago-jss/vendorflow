@@ -68,6 +68,7 @@ import { ListQuotationQueue } from "../../../application/use-cases/list-quotatio
 import { CreatePurchaseRequestDraft } from "../../../application/use-cases/create-purchase-request-draft";
 import { DeleteOwnPurchaseRequestDraft } from "../../../application/use-cases/delete-own-purchase-request-draft";
 import { GetOwnPurchaseRequest } from "../../../application/use-cases/get-own-purchase-request";
+import { GetQuotationWorkPurchaseRequest } from "../../../application/use-cases/get-quotation-work-purchase-request";
 import { ListOwnPurchaseRequests } from "../../../application/use-cases/list-own-purchase-requests";
 import { SubmitOwnPurchaseRequest } from "../../../application/use-cases/submit-own-purchase-request";
 import { UpdateOwnPurchaseRequestDraft } from "../../../application/use-cases/update-own-purchase-request-draft";
@@ -82,6 +83,10 @@ import {
   toPurchaseRequestPageResponse,
   toPurchaseRequestResponse,
 } from "../dto/purchase-request.response";
+import {
+  PurchaseRequestQuotationWorkResponse,
+  toPurchaseRequestQuotationWorkResponse,
+} from "../dto/purchase-request-quotation-work.response";
 import {
   PurchaseRequestApprovalQueueResponse,
   toPurchaseRequestApprovalQueueResponse,
@@ -119,6 +124,7 @@ export class PurchaseRequestsController {
     private readonly deleteOwnPurchaseRequestDraft: DeleteOwnPurchaseRequestDraft,
     private readonly listDepartmentApprovalQueue: ListDepartmentApprovalQueue,
     private readonly listQuotationQueue: ListQuotationQueue,
+    private readonly getQuotationWorkPurchaseRequest: GetQuotationWorkPurchaseRequest,
     private readonly decidePurchaseRequestApproval: DecidePurchaseRequestApproval,
   ) {}
 
@@ -266,6 +272,44 @@ export class PurchaseRequestsController {
                 ? null
                 : decodePurchaseRequestCursor(query.cursor),
           },
+        ),
+      ),
+    );
+  }
+
+  /**
+   * Declared before `:purchaseRequestId` with the queue it belongs to. It is a separate read
+   * rather than a role branch inside the requester's own one, so widening who may read a
+   * request can never happen by accident.
+   */
+  @Get("awaiting-quotation/:purchaseRequestId")
+  @ApiOperation({
+    summary: "One request from the Buyer's quotation queue, with its item lines",
+    description:
+      "FR-040/FR-041. The item identifiers, quantities and needed-by date a Buyer needs to register a quote, which prices every request item exactly once. Requires the BUYER role; ADMIN is not a bypass (AUTHZ-007). Organization-scoped (AUTHZ-004) and readable only while the request is in IN_QUOTATION. The justification, estimated prices, requester, department, approval history and lifecycle timestamps are not part of this response. Like the queue, it does not exclude the caller's own requests (BR-005 forbids deciding one's own request, not quoting it). Reading this is not an authority to register a quote: registration proves the request's state again on its own.",
+  })
+  @ApiParam({ name: "purchaseRequestId", format: "uuid" })
+  @ApiOkResponse({ type: PurchaseRequestQuotationWorkResponse })
+  @ApiBadRequestResponse({
+    description: "The identifier is not a version 4 UUID.",
+  })
+  @ApiForbiddenResponse({
+    description:
+      "Authenticated, but the principal does not hold BUYER. Nothing is read, and no resource is named.",
+  })
+  @ApiNotFoundResponse({
+    description:
+      "Unknown, another tenant's, or not awaiting quotation — indistinguishable by design (MT-004).",
+  })
+  async findQuotationWork(
+    @Param("purchaseRequestId", new ParseUUIDPipe({ version: "4" }))
+    purchaseRequestId: string,
+  ): Promise<PurchaseRequestQuotationWorkResponse> {
+    return this.run(async () =>
+      toPurchaseRequestQuotationWorkResponse(
+        await this.getQuotationWorkPurchaseRequest.execute(
+          this.tenantContext.getPrincipal(),
+          purchaseRequestId,
         ),
       ),
     );

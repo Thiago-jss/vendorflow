@@ -125,6 +125,37 @@ export interface OrganizationPurchaseRequestCriteria {
 }
 
 /**
+ * FR-040/FR-041. The organization-scoped read a Buyer prices a request from. The permitted
+ * states are part of the predicate alongside the tenant, so a request outside them is never
+ * loaded and answers exactly as an unknown identifier does (MT-004).
+ */
+export interface QuotationWorkPurchaseRequestCriteria
+  extends OrganizationPurchaseRequestCriteria {
+  readonly statuses: readonly PurchaseRequestStatus[];
+}
+
+/** One line of a request, as far as pricing it needs and no further. */
+export interface QuotationWorkPurchaseRequestItemRecord {
+  readonly id: string;
+  readonly position: number;
+  readonly description: string;
+  readonly unitOfMeasure: string;
+  /** Thousandths of a unit; exact, never a binary float. See `platform/numeric/scaled-quantity.ts`. */
+  readonly quantityScaled: ScaledQuantity;
+}
+
+/**
+ * What registering a quote needs from a request: its items and the date they are needed by.
+ * The justification, the estimates, the requester and the department are not selected at all,
+ * so they cannot reach the transport by accident.
+ */
+export interface QuotationWorkPurchaseRequestRecord {
+  readonly id: string;
+  readonly neededBy: Date;
+  readonly items: readonly QuotationWorkPurchaseRequestItemRecord[];
+}
+
+/**
  * FR-032/FR-034. The request half of an approval decision. There is no `requesterId`: the
  * actor is not the owner. `departmentId` is present only for a Manager decision, whose
  * responsibility boundary is a Department (AUTHZ-004); a Purchasing or Finance decision is
@@ -228,6 +259,14 @@ export interface PurchaseRequestRepository {
   findOrganizationRequest(
     criteria: OrganizationPurchaseRequestCriteria,
   ): Promise<PurchaseRequestRecord | null>;
+
+  /**
+   * FR-040/FR-041. One request at organization scope, only while it is in one of the given
+   * states, narrowed to what pricing its items needs.
+   */
+  findQuotationWorkRequest(
+    criteria: QuotationWorkPurchaseRequestCriteria,
+  ): Promise<QuotationWorkPurchaseRequestRecord | null>;
 
   listOwnRequests(
     criteria: ListOwnPurchaseRequestsCriteria,

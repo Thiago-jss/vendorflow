@@ -4,11 +4,14 @@ import type { PurchaseRequestListCursor } from "../../src/procurement/applicatio
 import { PrismaTransactionRunner } from "../../src/platform/persistence/prisma-transaction-runner";
 import { PrismaPurchaseRequestRepository } from "../../src/procurement/infrastructure/persistence/prisma-purchase-request.repository";
 import {
+  QUOTABLE_STATUSES,
   REQUESTER_CANCELLABLE_STATUSES,
   SUBMITTABLE_STATUSES,
+  purchaseRequestStatuses,
 } from "../../src/procurement/application/support/purchase-request-status";
 import type { NormalizedPurchaseRequestDraftItem } from "../../src/procurement/application/support/purchase-request-draft";
 import { createTenant, type TenantFixture } from "./identity-fixtures";
+import { createPurchaseRequest } from "./quotation-fixtures";
 import { PostgreSqlIntegrationTestHarness } from "./postgresql-test-harness";
 
 /**
@@ -411,6 +414,77 @@ describe("purchase request persistence tenant isolation (PostgreSQL)", () => {
         purchaseRequestId: draft.id,
       }),
     ).resolves.toBe(false);
+  });
+
+  describe("FR-040/FR-041 the Buyer's quotation-work read", () => {
+    it("reads a quotable request's items, in position order, and nothing it did not select", async () => {
+      const fixture = await createPurchaseRequest(database, organizationA, {
+        status: "IN_QUOTATION",
+        quantitiesScaled: [1_250n, 4_000n],
+      });
+
+      const found = await repository.findQuotationWorkRequest({
+        organizationId: organizationA.organizationId,
+        purchaseRequestId: fixture.purchaseRequestId,
+        statuses: QUOTABLE_STATUSES,
+      });
+
+      expect(found).toEqual({
+        id: fixture.purchaseRequestId,
+        neededBy: new Date("2026-11-30T00:00:00.000Z"),
+        items: [
+          {
+            id: fixture.itemIds[0],
+            position: 1,
+            description: "Line 1",
+            unitOfMeasure: "UN",
+            quantityScaled: 1_250n,
+          },
+          {
+            id: fixture.itemIds[1],
+            position: 2,
+            description: "Line 2",
+            unitOfMeasure: "UN",
+            quantityScaled: 4_000n,
+          },
+        ],
+      });
+    });
+
+    it("treats another tenant's quotable request as absent", async () => {
+      const foreign = await createPurchaseRequest(database, organizationB, {
+        status: "IN_QUOTATION",
+      });
+
+      await expect(
+        repository.findQuotationWorkRequest({
+          organizationId: organizationA.organizationId,
+          purchaseRequestId: foreign.purchaseRequestId,
+          statuses: QUOTABLE_STATUSES,
+        }),
+      ).resolves.toBeNull();
+    });
+
+    it("treats a same-tenant request in any non-quotable state as absent", async () => {
+      const nonQuotable = purchaseRequestStatuses.filter(
+        (status) => !QUOTABLE_STATUSES.includes(status),
+      );
+      expect(nonQuotable).toHaveLength(purchaseRequestStatuses.length - 1);
+
+      for (const status of nonQuotable) {
+        const fixture = await createPurchaseRequest(database, organizationA, {
+          status,
+        });
+
+        await expect(
+          repository.findQuotationWorkRequest({
+            organizationId: organizationA.organizationId,
+            purchaseRequestId: fixture.purchaseRequestId,
+            statuses: QUOTABLE_STATUSES,
+          }),
+        ).resolves.toBeNull();
+      }
+    });
   });
 
   describe("PostgreSQL refuses a cross-tenant relationship regardless of the caller", () => {
