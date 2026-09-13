@@ -82,4 +82,28 @@ describe("authenticated shell navigation", () => {
 
     expect(screen.queryByRole("link", { name: "Fornecedores" })).toBeNull();
   });
+
+  it("links the quotation workflow for a buyer", async () => {
+    renderShellFor(["BUYER"]);
+
+    const link = await screen.findByRole("link", { name: "Cotações" });
+
+    expect(link.getAttribute("href")).toBe("/quotations");
+  });
+
+  it("offers no quotation link to an admin, who is not a buyer bypass", async () => {
+    renderShellFor(["ADMIN"]);
+
+    await screen.findByRole("link", { name: "Fornecedores" });
+
+    expect(screen.queryByRole("link", { name: "Cotações" })).toBeNull();
+  });
+
+  it("offers no quotation link to employees and managers", async () => {
+    renderShellFor(["EMPLOYEE", "MANAGER"]);
+
+    await screen.findByRole("link", { name: "Minhas solicitações" });
+
+    expect(screen.queryByRole("link", { name: "Cotações" })).toBeNull();
+  });
 });
